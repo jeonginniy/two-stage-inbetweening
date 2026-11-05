@@ -8,17 +8,26 @@
 
 | 단계 | 내용 | 상태 |
 |---|---|---|
-| **1** | **데이터 파이프라인: BVH 읽기 → 모델 입력 표현 → 원래 형태로 복원** | ✅ 노트북 구현·테스트 완료 / 🔬 실제 LaFAN1 검증은 연구실 |
-| 2 | Context Transformer 구현 + 학습 | 예정 |
+| 1 | 데이터 파이프라인: BVH 읽기 → 모델 입력 표현 → 원래 형태로 복원 | ✅ 완료 (연구실 실제 LaFAN1 검증 통과) |
+| **2** | **Context Transformer 구현 + 학습** | ✅ 구현·가짜 데이터 테스트 완료 / 🔬 실제 학습은 연구실 |
 | 3 | Detail Transformer 구현 + 학습 | 예정 |
 | 4 | 평가 (공식 README 수치와 비교) + 시각화 | 예정 |
 
-### 1단계에서 확인된 것 / 연구실에서 할 것
+### 1단계 결과 (연구실, 실제 LaFAN1)
 
-- ✅ 노트북 (데이터 없음): `pytest` → **48 passed, 4 skipped** (skip = 실제 데이터 테스트).
-  가짜 LaFAN1 형식 데이터로 BVH → x (B,T,135) → 복원 오차 ~1e-14.
-- 🔬 연구실: [scripts/README.md](scripts/README.md) 의 "연구실 검증 순서" 6단계를 실행.
-  확인할 가정 목록은 [docs/assumptions.md](docs/assumptions.md).
+클립 수 train 404195 / benchmark 2232 (논문과 일치), 공식 통계와 평균 차이 ~1e-12·표준편차 차이 ~1e-8,
+스켈레톤 불일치 0, 위치채널=OFFSET 오차 0, 복원 오차 1e-13 이하, heading 0.47~0.88 (모두 양수).
+자세한 내용은 [docs/assumptions.md](docs/assumptions.md) 0 절.
+
+### 2단계 상태
+
+- ✅ 구현: `src/models/` (Context Transformer, 상대 위치 어텐션, Keyframe PE), `src/training/` (입력·마스크, 손실, 후처리),
+  `scripts/train_context.py`, 설정 `configs/model/context.yaml`.
+  입력/출력 차원(136/135)과 관절 수(22)는 코드에 쓰지 않고 스켈레톤 설정에서 계산한다.
+- ✅ 이 환경 (데이터 없음): `pytest` → **65 passed, 4 skipped**. 가짜 데이터로 shape, forward/backward,
+  마스크 동작, 과적합, 학습 스크립트 끝까지 실행을 확인.
+- 🔬 연구실: [scripts/README.md](scripts/README.md) 의 "2단계: Context Transformer 학습" 순서대로 실행.
+  2단계에서 정한 것/가정은 [docs/assumptions.md](docs/assumptions.md) E 절.
 
 ## 폴더 구조
 
@@ -30,10 +39,12 @@ two_stage_inbetweening/
 ├── configs/                   설정 (경로/GPU 는 여기에서만 관리)
 │   ├── env/laptop.yaml          노트북: LaFAN1 경로 null, device cpu
 │   ├── env/lab.yaml             연구실: LaFAN1 경로(수정 필요), device cuda:0
-│   └── data/lafan1.yaml         context_len, window/offset, 분할, 접촉 임계값
+│   ├── data/lafan1.yaml         context_len, window/offset, 분할, 접촉 임계값
+│   └── model/context.yaml       2단계: 모델 크기, batch size, 학습률, 손실 가중치
 ├── assets/
 │   └── skeleton_lafan1.yaml     22관절 이름·부모, 발 관절, 루트 앞 축
 ├── data/                      전처리 캐시 (자동 생성, git 제외)
+├── experiments/               학습 결과: 체크포인트, 로그 (자동 생성, git 제외)
 ├── src/                       라이브러리 코드
 │   ├── config.py                configs/ 로더
 │   └── data/                    1단계 파이프라인
@@ -44,7 +55,15 @@ two_stage_inbetweening/
 │       ├── representation.py      135차원 벡터, z-score               (논문 3.2, 식 10)
 │       ├── dataset.py             LaFAN1 슬라이딩 윈도우 Dataset       (논문 3.6.1, 4.1)
 │       └── pipeline.py            클립 → 모델 입력 → 복원 (한 함수씩)
-├── scripts/                   실행 스크립트 (데모, 연구실 검증, 통계 계산)
+│   ├── models/                  2단계
+│   │   ├── layers.py              상대 위치 어텐션, FFN, Keyframe PE      (논문 식 11–13)
+│   │   └── context_transformer.py Context Transformer                  (논문 3.3)
+│   └── training/                2단계
+│       ├── context_inputs.py      빈칸/마스크/보간/합치기/후처리         (논문 3.3, 3.6, 식 23)
+│       ├── losses.py              L_rot, L_pos, L_smooth                (논문 식 21)
+│       ├── context.py             배치 하나 학습/추론
+│       └── utils.py               Noam 학습률, 체크포인트, AMP
+├── scripts/                   실행 스크립트 (데모, 연구실 검증, 통계 계산, train_context.py)
 ├── tests/                     pytest 테스트 (+ 가짜 데이터 생성 도우미)
 └── docs/                      정리 노트
     ├── assumptions.md           가정/미확인 사항 ← 꼭 읽기
@@ -100,9 +119,10 @@ python scripts/inspect_dataset.py
 python scripts/check_bvh_roundtrip.py
 python scripts/compute_stats.py
 python scripts/compare_stats_with_official.py --official <공식repo>/tests/train_stats_context.pkl
+python scripts/train_context.py --run-name ctx_base          # 2단계 학습 (자세히: scripts/README.md)
 ```
 
-## 코드에서 쓰는 방법 (2단계 미리보기)
+## 코드에서 쓰는 방법 (1단계 파이프라인)
 
 ```python
 from src.config import load_data_config, load_env_config
@@ -121,4 +141,22 @@ norm = ZScoreNormalizer.load(env["paths"]["cache_dir"] / "stats" / "lafan1_conte
 inp = motion_to_model_input(batch["root_pos"], batch["local_rot"], cfg["context_len"],
                             skel.root_forward_local_axis, normalizer=norm)   # inp.x: (B, T, 135)
 root_pos, local_rot = model_output_to_motion(y, FeatureLayout(22), norm, frame=inp.frame)
+```
+
+## 코드에서 쓰는 방법 (2단계 Context Transformer)
+
+```python
+from src.config import load_model_config
+from src.models.context_transformer import build_context_transformer
+from src.training.context import context_forward, infer_context, prepare_batch
+from src.training.context_inputs import TransitionSpec
+
+mcfg = load_model_config("context")
+layout = FeatureLayout(skel.num_joints)                       # D = J*6+3 → 입력 D+1, 출력 D
+model = build_context_transformer(mcfg["model"], layout)
+
+pb = prepare_batch(batch, skel, norm, cfg["context_len"])     # 정렬 + 정규화 + 정답 FK
+spec = TransitionSpec(context_len=10, target_idx=40)          # transition 10..39, target 40
+losses = context_forward(model, pb, spec, skel, layout, norm, mcfg["loss"])   # {"loss","rot","pos","smooth"}
+y = infer_context(model, pb.x_gt, spec, layout)               # 예측 + 후처리 (식 23), (B, T, D) 정규화 공간
 ```

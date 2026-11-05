@@ -1,0 +1,72 @@
+# =============================================================================
+# Context Transformer 설정 (2단계)
+# -----------------------------------------------------------------------------
+# - 사용처: src/config.py 의 load_model_config("context")
+#           → src/models/context_transformer.py, scripts/train_context.py
+# - 입력/출력 차원(D = J*6 + 3 = 135)과 관절 수(J = 22)는 여기에 적지 않는다.
+#   configs/data/lafan1.yaml 의 skeleton 파일(관절 목록)에서 계산한다.
+#   (모델 입력 차원 = D + d_mask = 136, 출력 차원 = D = 135)
+# - 값의 출처:
+#     [논문 x.x]  = 논문에 명시된 값
+#     [공식코드]  = 논문에 없거나 확인 못 해서 공식 config(lafan1_context_model.json)에서 가져온 값
+#     [결정]      = 이 프로젝트에서 정한 값 (docs/assumptions.md 의 E 절)
+# =============================================================================
+
+model:
+  d_mask: 1              # [논문 3.3] m_in ∈ R^{T×1} (프레임 단위 마스크; 부분 제약은 아직 미지원)
+  n_layer: 6             # [공식코드]
+  n_head: 8              # [공식코드]
+  d_model: 512           # [공식코드]
+  d_head: 64             # [공식코드]
+  d_ff: 512              # [공식코드] d_pff_inner. FFN 중간 차원
+  d_encoder_h: 512       # [공식코드] 입력 MLP(E) 은닉 차원
+  d_decoder_h: 512       # [공식코드] 출력 MLP(D) 은닉 차원
+  dropout: 0.0           # [공식코드]
+  attn_bias: false       # [공식코드] q/k/v/out 선형층 bias
+  # 어텐션 점수 스케일. "d_head" → 1/sqrt(d_head) (표준 Transformer),
+  # "d_model" → 1/sqrt(d_model) (공식 코드). [결정] E3
+  attn_scale: d_head
+
+train:
+  # ---- 배치/메모리 (RTX 3070 8GB 기준) ----
+  # 기본 모델은 1,038만 파라미터, 클립 길이 42 라서 batch 32 는 8GB 에 여유가 클 것으로 예상한다
+  # (계산상 수백 MB. 실제 값은 학습 로그의 "VRAM 최대" 로 확인 — 아직 GPU 에서 측정 안 함).
+  # 메모리가 부족하면 batch_size 를 줄이고 grad_accum_steps 를 늘리면
+  # "유효 배치 = batch_size × grad_accum_steps" 가 유지된다.
+  batch_size: 32         # [공식코드]
+  grad_accum_steps: 1    # [결정] 1 = 누적 없음
+  amp: null              # [결정] null | fp16 | bf16. 혼합 정밀도 (CUDA 에서만 적용)
+
+  # ---- 최적화 ----
+  # Noam 스케줄: lr(it) = base_lr × min(it × warmup^-1.5, it^-0.5)
+  #   → warmup 끝(8000)에서 최대 0.0625 / sqrt(8000) ≈ 7.0e-4, 이후 1/sqrt(it) 로 감소
+  base_lr: 0.0625        # [공식코드] lr
+  warmup_iters: 8000     # [공식코드] lr_warmup_iterations
+  adam_betas: [0.9, 0.999]   # [공식코드] torch Adam 기본값
+  weight_decay: 0.0      # [공식코드]
+  grad_clip: null        # [결정] null = 사용 안 함 (공식 코드도 안 씀)
+
+  # ---- 학습 길이 ----
+  # [가정] 논문에 학습 반복 수가 없다. 공식은 total_epoch 2000 (사실상 수동 중단).
+  # max_iters 에 도달하면 멈춘다. 연구실에서 val 손실을 보며 조절할 것.
+  max_iters: 500000
+  seed: 0
+
+  # ---- 입력 만들기 (논문 3.3, 3.6.1) ----
+  # context_len, min_trans, max_trans 는 configs/data/lafan1.yaml 에서 읽는다.
+  midway_targets_amount: 0.1   # [공식코드] transition 길이 × 0.1 번 뽑기 시도
+  midway_targets_p: 0.5        # [공식코드] 각 시도가 제약 프레임을 만들 확률
+
+  # ---- 기록/검증 ----
+  log_interval: 100            # 학습 손실 출력 간격 (iteration)
+  val_interval: 2000           # 검증 간격
+  ckpt_interval: 5000          # 최신 체크포인트 저장 간격
+  val_trans: [5, 15, 30]       # 검증 transition 길이들. 마지막 값으로 best 체크포인트를 고른다
+  val_batch_size: 64
+  val_split: val               # configs/data/lafan1.yaml 의 splits 이름
+
+# [논문 식 21] L_ctx = L_rot + α_pos·L_pos + α_smooth·L_smooth  (모두 L1, transition 프레임만)
+loss:
+  w_rot: 1.0             # [논문 식 21] / [공식코드] rw
+  w_pos: 0.01            # [논문 식 21] / [공식코드] pw
+  w_smooth: 0.005        # [논문 식 21] / [공식코드] sw

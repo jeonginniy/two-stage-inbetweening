@@ -33,7 +33,7 @@
 - [공식코드] 실제로는 정규화된 x 에 m_in 을 곱해서 모르는 값을 0 으로 만든 뒤, 루트 위치 차원만
   (정규화된 공간에서) 선형보간 값으로 다시 채운다. 입력 차원 = 135 + 1(마스크) = 136.
   → 즉 논문의 "회전 = 0" 은 **정규화된 값이 0** (= 데이터 평균 회전) 이라는 뜻으로 구현돼 있다.
-  2단계에서 이 해석을 따를지 정해야 한다 (가정으로 기록할 것).
+  → 2단계에서 이 해석을 따랐다 (`docs/assumptions.md` E7, 코드 `src/training/context_inputs.py`).
 - 어텐션 마스크 (그림 5a): 모든 query 가 **context, 제약, target 프레임(key)만** 볼 수 있다.
 - 위치 인코딩: Keyframe PE (식 11, 입력 = 각 프레임의 [마지막 context 로부터 거리, target 까지 거리])
   + Learned Relative PE (식 12–13, 어텐션 안에서).
@@ -51,6 +51,8 @@
    - target 쪽 외삽에 **target 다음 프레임**이 필요하다 → 이것이 window 가 42 (= 10+30+**2**) 인 이유.
    - [공식코드] Context 학습 config 는 window 41 (후처리 없이 학습), Detail 학습 config 는 42
      (Detail 학습 중 고정된 Context 를 후처리까지 포함해 추론하므로).
+   - 2단계 결정: Context 도 window 42 로 학습 (target 다음 프레임은 key 로 가려지므로 41 과 결과가 같음, E1).
+     후처리는 `src/training/context_inputs.postprocess`, 3단계에서는 `src/training/context.infer_context` 를 쓰면 된다.
 3. x_det 만들기 (3.4): 정답 클립에서 **transition 구간만** y_ctx 로 바꿔 넣는다.
    제약 프레임은 제약된 값은 정답, 나머지만 y_ctx.
 4. m_in 은 Context 와 동일.

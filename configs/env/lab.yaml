@@ -20,6 +20,9 @@ paths:
   # 내 통계를 비교할 때 사용. 예: /home/CHANGE_ME/projects/motion_inbetweening
   official_repo: null
 
+  # 학습 결과(체크포인트, 로그) 폴더 (프로젝트 루트 기준, git 제외)
+  experiments_dir: experiments
+
 # GPU 1장 (RTX 3070 8GB)
 device: cuda:0
 

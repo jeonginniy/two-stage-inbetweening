@@ -19,6 +19,9 @@ paths:
   # 노트북에는 C:/Users/aa010/projects/motion_inbetweening 이 없었음.
   official_repo: null
 
+  # 학습 결과(체크포인트, 로그) 폴더 (프로젝트 루트 기준, git 제외)
+  experiments_dir: experiments
+
 # 연산 장치: "cpu" 또는 "cuda:0" 등. cuda 를 적었는데 GPU 가 없으면 cpu 로 대체(경고).
 device: cpu
 

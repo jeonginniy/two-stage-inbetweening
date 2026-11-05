@@ -7,8 +7,8 @@
 |---|---|---|
 | `config.py` | `configs/` 의 YAML 을 읽는다. 경로/device 는 반드시 여기를 거친다 | 1 |
 | `data/` | 데이터 파이프라인: BVH → 모델 입력 → 복원 (`data/README.md`) | 1 |
-| `models/` (예정) | Context Transformer, Detail Transformer | 2, 3 |
-| `training/` (예정) | 손실 함수(논문 3.5), 학습 루프 | 2, 3 |
+| `models/` | Context Transformer (✅ 2단계), Detail Transformer (3단계 예정) | 2, 3 |
+| `training/` | Context 입력/마스크, 손실 함수(논문 3.5), 학습 한 스텝, 학습 도구 | 2, 3 |
 | `evaluation/` (예정) | L2P, L2Q, NPSS (논문 4.1) | 4 |
 
 import 는 프로젝트 루트 기준으로 한다: `from src.data.bvh import load_bvh`.

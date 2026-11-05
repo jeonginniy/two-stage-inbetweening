@@ -106,6 +106,22 @@ def load_data_config(name: str = "lafan1") -> dict[str, Any]:
     return cfg
 
 
+def load_model_config(name: str = "context") -> dict[str, Any]:
+    """모델/학습 설정을 읽는다 (configs/model/<name>.yaml).
+
+    name 에 ".yaml" 로 끝나는 경로를 주면 그 파일을 직접 읽는다 (실험용 사본 등).
+    출력 dict: {"model": {...}, "train": {...}, "loss": {...}}
+    """
+    path = Path(name) if str(name).endswith((".yaml", ".yml")) else CONFIG_DIR / "model" / f"{name}.yaml"
+    path = resolve_path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"{path} 가 없습니다.")
+    cfg = load_yaml(path)
+    for key in ("model", "train", "loss"):
+        cfg.setdefault(key, {})
+    return cfg
+
+
 def require_dir(path: Path | None, what: str) -> Path:
     """경로가 설정돼 있고 실제로 존재하는 폴더인지 확인한다. 아니면 친절한 에러.
 
