@@ -1,0 +1,27 @@
+# =============================================================================
+# 실행 환경 설정: 연구실 (Ubuntu, RTX 3070 8GB)
+# -----------------------------------------------------------------------------
+# - 사용처: src/config.py 의 load_env_config("lab")
+# - 선택 방법: 스크립트에 --env lab 을 주거나, export TSI_ENV=lab
+# - 상대경로는 "프로젝트 루트" 기준으로 해석된다.
+#
+# TODO(연구실): 아래 lafan1_bvh_dir 을 실제 경로로 바꿔야 한다.
+#   지금 값은 자리표시자(placeholder)이며 실제로 존재하는 경로가 아니다.
+# =============================================================================
+
+paths:
+  # LaFAN1 BVH 폴더 (aiming1_subject1.bvh ... walk4_subject1.bvh, 총 77개)
+  lafan1_bvh_dir: /home/CHANGE_ME/datasets/lafan1
+
+  # 전처리 캐시 폴더 (프로젝트 루트 기준)
+  cache_dir: data/cache
+
+  # (선택) 공식 코드 폴더. 공식 통계 파일(tests/train_stats_context.pkl)과
+  # 내 통계를 비교할 때 사용. 예: /home/CHANGE_ME/projects/motion_inbetweening
+  official_repo: null
+
+# GPU 1장 (RTX 3070 8GB)
+device: cuda:0
+
+# DataLoader 워커 수
+num_workers: 4

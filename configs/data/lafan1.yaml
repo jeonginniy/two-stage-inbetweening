@@ -1,0 +1,64 @@
+# =============================================================================
+# LaFAN1 데이터 설정 (환경과 무관한 값만. 경로는 configs/env/*.yaml 에 있음)
+# -----------------------------------------------------------------------------
+# - 사용처: src/config.py 의 load_data_config("lafan1")
+#           → src/data/dataset.py, scripts/*.py
+# - 값의 출처를 각 줄에 적었다:
+#     [논문 x.x]  = 논문에 명시된 값
+#     [공식코드]  = 논문에 없고 공식 코드 config 에서 가져온 값 (가정)
+# =============================================================================
+
+# 스켈레톤 정의 파일 (프로젝트 루트 기준)
+skeleton: assets/skeleton_lafan1.yaml
+
+fps: 30                      # [논문 4.1] 30Hz
+
+context_len: 10              # [논문 4.1] t_ctx = 10 (context 프레임 수)
+max_trans: 30                # [논문 4.1] t_max_trans = 30 (학습 시 최대 transition 길이)
+min_trans: 5                 # [공식코드] 학습 시 최소 transition 길이
+
+# 논문 3.6.1 전처리: 마지막 context 프레임에서 루트가 이 월드 축을 바라보게 회전
+forward_world_axis: x        # [논문 3.6.1] "root joint faces the X+ axis"
+
+# 발 접촉 라벨 c 를 만들 때 쓰는 속도 임계값 (논문 3.4 의 c ∈ R^{T×4})
+# 프레임 간 위치 변화의 |dx|+|dy|+|dz| (LaFAN1 단위: cm/frame) 가 이 값보다 작으면 접촉=1
+contact_vel_threshold: 0.2   # [공식코드] 논문에는 라벨 생성 방법이 없음 → 가정
+
+# -----------------------------------------------------------------------------
+# 데이터 분할. window = 클립 길이 T, offset = 슬라이딩 간격, start_frame = 각 파일에서 버릴 앞부분
+# -----------------------------------------------------------------------------
+splits:
+  # [논문 3.6.1] T = t_ctx + t_max_trans + 2 = 10 + 30 + 2 = 42, offset 1
+  # 주의: 공식 context 모델 config 는 window 41, detail 모델은 42 를 쓴다.
+  #       (docs/assumptions.md 참고. 2단계에서 다시 결정)
+  train:
+    actors: [subject1, subject2, subject3, subject4]
+    window: 42
+    offset: 1
+    start_frame: 0
+
+  # [논문 3.6.1] z-score 통계 μ_x, σ_x 는 window 50, offset 20 으로 계산
+  train_stats:
+    actors: [subject1, subject2, subject3, subject4]
+    window: 50
+    offset: 20
+    start_frame: 0
+
+  # [공식코드] 검증(validation) 세트. 논문에는 없음.
+  val:
+    actors: [subject5]
+    window: 65
+    offset: 160
+    start_frame: 35
+
+  # [논문 4.1] 벤치마크(test) 세트: Subject 5, window 65, offset 40 → 2232 클립
+  benchmark:
+    actors: [subject5]
+    window: 65
+    offset: 40
+    start_frame: 0
+
+# [논문 4.1] 논문이 보고한 클립 수. scripts/inspect_dataset.py 가 내 결과와 비교한다.
+expected_clip_counts:
+  train: 404195
+  benchmark: 2232

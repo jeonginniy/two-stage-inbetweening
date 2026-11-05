@@ -1,0 +1,58 @@
+# =============================================================================
+# LaFAN1 스켈레톤 정의 (22 관절)
+# -----------------------------------------------------------------------------
+# - 사용처: src/data/skeleton.py 의 Skeleton.from_yaml() 이 이 파일을 읽는다.
+# - 관절 순서 = BVH 파일 HIERARCHY 에 나오는 순서(깊이 우선). 이 순서가 곧
+#   모델 입력 벡터에서 관절이 놓이는 순서다 (논문 3.2, r_t ∈ R^{J×6}, J = 22).
+# - 뼈 길이(offset)는 여기 적지 않는다. 실제 값은 BVH 파일의 OFFSET 에서 읽는다.
+#   (노트북에는 LaFAN1 이 없어서 실제 offset 값을 확인할 수 없었음 → 추측해서
+#    적지 않음.)
+#
+# [가정] 아래 이름/부모 관계는 공식 코드(tests/test_data.py 의 22 관절, 발 인덱스
+#   3,4 / 7,8)와 LaFAN1 공개 정보를 바탕으로 적은 것이다. 실제 BVH 와 일치하는지는
+#   연구실에서 scripts/check_bvh_roundtrip.py 로 검증해야 한다
+#   (불일치하면 데이터 로더가 에러를 낸다).
+# =============================================================================
+
+name: lafan1
+
+# parent: 부모 관절 이름 (루트는 null)
+joints:
+  - {name: Hips,          parent: null}           # 0  루트
+  - {name: LeftUpLeg,     parent: Hips}           # 1
+  - {name: LeftLeg,       parent: LeftUpLeg}      # 2
+  - {name: LeftFoot,      parent: LeftLeg}        # 3  ← 왼발 contact
+  - {name: LeftToe,       parent: LeftFoot}       # 4  ← 왼발가락 contact
+  - {name: RightUpLeg,    parent: Hips}           # 5
+  - {name: RightLeg,      parent: RightUpLeg}     # 6
+  - {name: RightFoot,     parent: RightLeg}       # 7  ← 오른발 contact
+  - {name: RightToe,      parent: RightFoot}      # 8  ← 오른발가락 contact
+  - {name: Spine,         parent: Hips}           # 9
+  - {name: Spine1,        parent: Spine}          # 10
+  - {name: Spine2,        parent: Spine1}         # 11
+  - {name: Neck,          parent: Spine2}         # 12
+  - {name: Head,          parent: Neck}           # 13
+  - {name: LeftShoulder,  parent: Spine2}         # 14
+  - {name: LeftArm,       parent: LeftShoulder}   # 15
+  - {name: LeftForeArm,   parent: LeftArm}        # 16
+  - {name: LeftHand,      parent: LeftForeArm}    # 17
+  - {name: RightShoulder, parent: Spine2}         # 18
+  - {name: RightArm,      parent: RightShoulder}  # 19
+  - {name: RightForeArm,  parent: RightArm}       # 20
+  - {name: RightHand,     parent: RightForeArm}   # 21
+
+# 논문 3.4 / 식 (15): Detail Transformer 가 예측하는 발 접촉 ĉ ∈ R^{T×4}
+# 순서: [LeftFoot, LeftToe, RightFoot, RightToe]
+contact_joints:
+  left: [LeftFoot, LeftToe]
+  right: [RightFoot, RightToe]
+
+# 루트(Hips)의 "앞쪽"을 나타내는 로컬 축.
+# 논문 3.6.1: "root joint faces the X+ axis" 로 정렬할 때 이 축을 기준으로 삼는다.
+# [가정] 공식 코드 주석("y axis is the local forward axis for root joint")을
+#   따른 값이다. 논문에는 명시돼 있지 않다. 연구실에서
+#   scripts/check_bvh_roundtrip.py 의 heading 검사로 확인할 것.
+root_forward_local_axis: [0.0, 1.0, 0.0]
+
+# 월드 좌표의 위쪽 축 (LaFAN1 은 Y-up). 정렬 시 이 축 기준으로만 회전한다.
+up_axis: y
