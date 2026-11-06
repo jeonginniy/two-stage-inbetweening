@@ -38,6 +38,7 @@ import argparse
 import random
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -115,10 +116,10 @@ def slerp(q0: torch.Tensor, q1: torch.Tensor, w: torch.Tensor, eps: float = 1e-6
     return q / q.norm(dim=-1, keepdim=True)
 
 
-def slerp_baseline(pb: PreparedBatch, spec: TransitionSpec, skel: Skeleton, layout: FeatureLayout) -> torch.Tensor:
-    """마지막 context 프레임과 target 사이를 SLERP/선형보간 → 전역 관절 위치 (B, L, J, 3).
+def slerp_pose(pb: PreparedBatch, spec: TransitionSpec, layout: FeatureLayout) -> tuple[torch.Tensor, torch.Tensor]:
+    """마지막 context 프레임과 target 사이를 SLERP/선형보간 → (루트 위치 (B,L,3), 로컬 회전 (B,L,J,3,3)), 정렬된 좌표.
 
-    정답(정렬된 원값) 에서 시작해 같은 FK (global_positions) 로 위치를 구한다.
+    정답(정렬된 원값) 에서 시작한다. transition 밖은 정답 그대로.
     """
     root, rot = decode_pose(pb.x_gt_raw, layout)               # (B,L,3), (B,L,J,3,3)
     a, b = spec.context_len - 1, spec.target_idx
@@ -130,6 +131,12 @@ def slerp_baseline(pb: PreparedBatch, spec: TransitionSpec, skel: Skeleton, layo
     s = spec.seq_slice
     root = torch.cat([root[:, :s.start], root_i, root[:, s.stop:]], dim=1)
     rot = torch.cat([rot[:, :s.start], rot_i, rot[:, s.stop:]], dim=1)
+    return root, rot
+
+
+def slerp_baseline(pb: PreparedBatch, spec: TransitionSpec, skel: Skeleton, layout: FeatureLayout) -> torch.Tensor:
+    """SLERP 기준선 → 전역 관절 위치 (B, L, J, 3). 같은 FK (global_positions) 사용."""
+    root, rot = slerp_pose(pb, spec, layout)
     return global_positions(encode_pose(root, rot), pb.offsets, skel, layout)
 
 
@@ -322,75 +329,136 @@ def render_video(path: Path, tracks: dict[str, np.ndarray], errors: dict[str, np
 
 
 # -----------------------------------------------------------------------------
-# 메인
+# 공용: 설정·모델 읽기 → 클립 고르기 → 생성  (scripts/export_bvh.py 도 사용)
 # -----------------------------------------------------------------------------
-def main() -> None:
-    args = parse_args()
-    ckpt_path = resolve_path(args.ckpt)
-    cfg_path = resolve_path(args.config) if args.config else ckpt_path.parent / "config.yaml"
+@dataclass
+class Run:
+    """학습 결과 하나 (설정, 모델, val 데이터)."""
+
+    cfg: dict
+    data_cfg: dict
+    device: torch.device
+    skel: Skeleton
+    layout: FeatureLayout
+    norm: ZScoreNormalizer
+    model: torch.nn.Module
+    ckpt: dict
+    ckpt_path: Path
+    val_ds: LafanDataset
+    split: str
+
+    @property
+    def ctx(self) -> int:
+        return self.data_cfg["context_len"]
+
+
+def load_run(ckpt: Path, config: Path | None = None, env_name: str | None = None,
+             device: str | None = None) -> Run:
+    """<ckpt 폴더>/config.yaml (학습 때 저장된 그대로) → 모델, 정규화, val 데이터셋."""
+    ckpt_path = resolve_path(ckpt)
+    cfg_path = resolve_path(config) if config else ckpt_path.parent / "config.yaml"
     if not ckpt_path.exists():
         raise FileNotFoundError(f"체크포인트 {ckpt_path} 가 없습니다.")
     if not cfg_path.exists():
         raise FileNotFoundError(f"설정 파일 {cfg_path} 가 없습니다 (train_context.py 가 run 폴더에 저장).")
-    if not writers.is_available("ffmpeg"):
-        raise FileNotFoundError("ffmpeg 가 없습니다. sudo apt install ffmpeg")
-
-    # ----- 설정 (학습 때 저장된 그대로) -----
     cfg = load_yaml(cfg_path)
     data_cfg = cfg["data"]
     if cfg.get("fake_data"):
         raise ValueError(f"{cfg_path} 는 --fake-data 로 학습한 결과입니다.")
-    env = load_env_config(args.env or cfg["env"])
-    device = torch.device(args.device) if args.device else resolve_device(env)
+    env = load_env_config(env_name or cfg["env"])
+    dev = torch.device(device) if device else resolve_device(env)
 
     skel = Skeleton.from_yaml(resolve_path(data_cfg["skeleton"]))
     layout = FeatureLayout(skel.num_joints)
-    norm = ZScoreNormalizer.load(resolve_path(cfg["stats"])).to(device=device, dtype=torch.float32)
-    head = skel.names.index("Head") if "Head" in skel.names else skel.num_joints - 1
-
+    norm = ZScoreNormalizer.load(resolve_path(cfg["stats"])).to(device=dev, dtype=torch.float32)
     split = cfg["train"].get("val_split", "val")
     sp = data_cfg["splits"][split]
-    ctx, trans, total = data_cfg["context_len"], args.trans, args.total_frames
-    if ctx + trans + 2 > sp["window"]:
-        raise ValueError(f"trans {trans}: {split} window {sp['window']} < context {ctx} + trans + 2")
-    pre, post = padding_frames(total, ctx, trans)
     val_ds = LafanDataset(require_dir(env["paths"]["lafan1_bvh_dir"], "LaFAN1 BVH 폴더"), sp["actors"],
                           sp["window"], sp["offset"], skel, start_frame=sp["start_frame"],
                           contact_threshold=data_cfg["contact_vel_threshold"],
                           cache_dir=env["paths"]["cache_dir"], dtype=torch.float32)
-
-    # ----- 모델 -----
-    ckpt = load_checkpoint(ckpt_path, map_location=device)
-    model = build_context_transformer(cfg["model"], layout).to(device)
-    model.load_state_dict(ckpt["model"])
+    ck = load_checkpoint(ckpt_path, map_location=dev)
+    model = build_context_transformer(cfg["model"], layout).to(dev)
+    model.load_state_dict(ck["model"])
     model.eval()
-    print(f"체크포인트 {ckpt_path} (iteration {ckpt['iteration']}, best_val {ckpt['best_val']:.4f}), "
-          f"device={device}, {split} 클립 {len(val_ds)}, trans {trans}")
+    print(f"체크포인트 {ckpt_path} (iteration {ck['iteration']}, best_val {ck['best_val']:.4f}), "
+          f"device={dev}, {split} 클립 {len(val_ds)}")
+    return Run(cfg, data_cfg, dev, skel, layout, norm, model, ck, ckpt_path, val_ds, split)
 
-    # ----- 클립 고르기: 앞 pre / 뒤 (total - pre) 프레임이 같은 BVH 안에 있는 클립만 -----
+
+def select_clips(run: Run, trans: int, total: int, n: int, seed: int) -> tuple[int, int, list[int]]:
+    """앞뒤 원본 여유가 있는 val 클립 n 개를 고른다. 출력 (pre, post, 클립 번호 목록)."""
+    ds, ctx = run.val_ds, run.ctx
+    window = run.data_cfg["splits"][run.split]["window"]
+    if ctx + trans + 2 > window:
+        raise ValueError(f"trans {trans}: {run.split} window {window} < context {ctx} + trans + 2")
+    pre, post = padding_frames(total, ctx, trans)
     ok = []
-    for i in range(len(val_ds)):
-        fi, start = val_ds.locate(i)
-        if start - pre >= 0 and start - pre + total <= val_ds.frames[fi]:
+    for i in range(len(ds)):                     # 앞 pre / 뒤 (total - pre) 프레임이 같은 BVH 안에 있는 클립만
+        fi, start = ds.locate(i)
+        if start - pre >= 0 and start - pre + total <= ds.frames[fi]:
             ok.append(i)
     if not ok:
-        raise ValueError(f"앞뒤 여유 (앞 {pre}, 뒤 {total - pre} 프레임) 가 있는 {split} 클립이 없습니다. "
+        raise ValueError(f"앞뒤 여유 (앞 {pre}, 뒤 {total - pre} 프레임) 가 있는 {run.split} 클립이 없습니다. "
                          f"--total_frames 를 줄이세요.")
-    idx = sorted(random.Random(args.seed).sample(ok, min(args.n, len(ok))))
-    clips = [val_ds.locate(i) for i in idx]
+    idx = sorted(random.Random(seed).sample(ok, min(n, len(ok))))
     print(f"영상 {total} 프레임 ({total / FPS:.1f}초) = 원본 {pre} + context {ctx} + transition {trans} + "
-          f"target 1 + 원본 {post}  "
-          f"(앞뒤 여유 있는 클립 {len(ok)}/{len(val_ds)} 중 {len(idx)}개)")
+          f"target 1 + 원본 {post}  (앞뒤 여유 있는 클립 {len(ok)}/{len(ds)} 중 {len(idx)}개)")
+    return pre, post, idx
 
-    # ----- 생성 (validate() 와 같은 함수) -----
-    batch = default_collate([val_ds[i] for i in idx])
-    pb, spec, _, gpos = eval_transition(model, batch, trans, data_cfg, skel, layout, norm, device)
-    gpos_slerp = slerp_baseline(pb, spec, skel, layout) if args.slerp else None
 
-    # ----- 앞뒤로 늘린 원본: 같은 정렬 (기준 프레임 = 늘린 시퀀스의 pre + ctx − 1 = 창의 ctx − 1) -----
-    pb_full = prepare_batch(extended_batch(val_ds, clips, pre, total), skel, norm, pre + ctx,
-                            data_cfg["forward_world_axis"], device)
-    gt_full = pb_full.gpos_gt                                    # (B, total, J, 3)
+@dataclass
+class Inference:
+    """클립 묶음 하나의 생성 결과. 좌표는 모두 학습용 정렬 좌표.
+
+    pb, spec, y, gpos : eval_transition 결과 (모델 창, 길이 L = ctx + trans + 2)
+    gpos_slerp        : SLERP 기준선 전역 위치 (모델 창) 또는 None
+    ext_batch         : 앞뒤로 늘린 원본 (월드 좌표, LafanDataset 배치 형식, total 프레임)
+    pb_full           : ext_batch 를 같은 기준 프레임으로 정렬한 PreparedBatch
+    """
+
+    idx: list[int]
+    clips: list[tuple[int, int]]
+    pre: int
+    pb: PreparedBatch
+    spec: TransitionSpec
+    y: torch.Tensor
+    gpos: torch.Tensor
+    gpos_slerp: torch.Tensor | None
+    ext_batch: dict
+    pb_full: PreparedBatch
+
+
+def infer_clips(run: Run, idx: list[int], trans: int, pre: int, total: int, with_slerp: bool) -> Inference:
+    """validate() 와 같은 함수 (eval_transition) 로 생성 + 앞뒤로 늘린 원본을 같은 정렬로."""
+    ds, ctx = run.val_ds, run.ctx
+    clips = [ds.locate(i) for i in idx]
+    batch = default_collate([ds[i] for i in idx])
+    pb, spec, y, gpos = eval_transition(run.model, batch, trans, run.data_cfg, run.skel, run.layout,
+                                        run.norm, run.device)
+    gpos_slerp = slerp_baseline(pb, spec, run.skel, run.layout) if with_slerp else None
+    # 정렬 기준 프레임 = 늘린 시퀀스의 pre + ctx − 1 = 모델 창의 ctx − 1
+    ext = extended_batch(ds, clips, pre, total)
+    pb_full = prepare_batch(ext, run.skel, run.norm, pre + ctx, run.data_cfg["forward_world_axis"], run.device)
+    return Inference(idx, clips, pre, pb, spec, y, gpos, gpos_slerp, ext, pb_full)
+
+
+# -----------------------------------------------------------------------------
+# 메인
+# -----------------------------------------------------------------------------
+def main() -> None:
+    args = parse_args()
+    if not writers.is_available("ffmpeg"):
+        raise FileNotFoundError("ffmpeg 가 없습니다. sudo apt install ffmpeg")
+    run = load_run(args.ckpt, args.config, args.env, args.device)
+    skel, val_ds, ckpt, ckpt_path = run.skel, run.val_ds, run.ckpt, run.ckpt_path
+    head = skel.names.index("Head") if "Head" in skel.names else skel.num_joints - 1
+    ctx, trans, total = run.ctx, args.trans, args.total_frames
+    pre, post, idx = select_clips(run, trans, total, args.n, args.seed)
+    inf = infer_clips(run, idx, trans, pre, total, args.slerp)
+    clips, pb, spec, gpos, gpos_slerp = inf.clips, inf.pb, inf.spec, inf.gpos, inf.gpos_slerp
+
+    gt_full = inf.pb_full.gpos_gt                                # (B, total, J, 3)
     L = pb.gpos_gt.shape[1]
     align_err = float((gt_full[:, pre:pre + L] - pb.gpos_gt).norm(dim=-1).max())
     pred_full = splice(gt_full, gpos, pre, spec.seq_slice)      # transition 밖은 원본 포즈

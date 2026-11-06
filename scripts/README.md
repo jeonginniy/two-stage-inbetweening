@@ -12,6 +12,8 @@
 | `compare_stats_with_official.py` | 연구실 🔬 | 내 통계 vs 공식 저장소의 `tests/train_stats_context.pkl` 차원별 비교 |
 | `train_context.py` | 연구실 🔬 / 노트북 (`--fake-data`) | **2단계** Context Transformer 학습 (논문 3.3, 3.5, 3.6). 체크포인트·로그를 `experiments/<run>/` 에 저장 |
 | `render_compare.py` | 연구실 🔬 | 학습된 모델로 val 클립 transition 생성 → 원본(파랑)/생성(빨강)/SLERP(회색, `--slerp`) 겹친 30fps mp4. 클립별 gpos_l2 와 context 일치 여부 출력 |
+| `export_bvh.py` | 연구실 🔬 | 같은 클립을 원본/생성/SLERP BVH 로 저장 (LaFAN1 계층·offset, 월드 좌표 cm). 재읽기 FK 검증 출력 |
+| `blender_render.py` | 연구실 (Blender) | `blender --background --python ... -- <클립폴더>` 로 세 BVH 를 EEVEE mp4 렌더 |
 
 🔬 = 실제 LaFAN1 이 필요. 노트북에서 실행하면 "경로가 null" 메시지를 내고 종료한다 (정상).
 
@@ -125,6 +127,23 @@ python scripts/render_compare.py --slerp --total_frames 450 --offset 2.0
   출력되는 클립별 `gpos_l2` 는 `log.csv` 의 `val{trans}_gpos_l2` 와 같은 식 (클립 몇 개 평균이라 값은 다를 수 있음).
 - `context 구간 ... 최대 오차`, `앞뒤 원본 정렬 일치 ... 최대 오차` 가 ≈1e-5 cm 이하가 아니면 버그.
 - 연구실 RTX 3070 에서 영상 1개 (300프레임) 약 18초.
+
+### 6. BVH 저장 + Blender 렌더
+
+```bash
+python scripts/export_bvh.py                    # → experiments/ctx_base/bvh/<파일>_f<프레임>_trans30/{gt,pred,slerp}.bvh, meta.json
+blender --background --python scripts/blender_render.py -- experiments/ctx_base/bvh/<클립폴더>          # → render.mp4
+blender --background --python scripts/blender_render.py -- <클립폴더> --still 150   # 150번 프레임만 PNG (빠른 확인)
+```
+
+- 클립 선택·생성은 `render_compare.py` 의 `load_run / select_clips / infer_clips` 를 그대로 쓴다
+  (`--seed`, `--trans`, `--total_frames` 가 같으면 같은 클립).
+- 계층·OFFSET·End Site·회전 순서 (zyx) 는 LaFAN1 원본 BVH 에서 가져온다. 학습용 정렬을 되돌려 원본 월드 좌표 (cm) 로 저장.
+  `--side_offset 150` (cm): 생성 +, SLERP − 를 진행 방향에 수직으로 옮김 (0 이면 원래 자리, 겹쳐 보기).
+- 저장 파일은 루트 6채널 + 나머지 3채널 (원본은 모든 관절 6채널. 비루트 위치 채널 = OFFSET).
+- 검증: `gt.bvh vs LaFAN1 원본` (재읽기 FK vs 원본 파일 같은 프레임), `pred/slerp.bvh vs 모델 출력` 이 ~1e-4 cm 이하.
+- Blender 4.0 확인. 연구실 PC 에서 클립 하나 (300 프레임, 1280x720, EEVEE 16 샘플) 약 20초.
+  BVH 는 scale 0.01 로 import, 뼈는 원기둥/구 메시 (Armature modifier). 라벨은 Noto Sans CJK (없으면 영어).
 
 ### 데이터 없이 동작만 확인 (노트북/이 환경)
 
