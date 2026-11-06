@@ -1,29 +1,35 @@
 """
-[연구실] Context Transformer 결과 영상: 원본 vs 생성 스켈레톤 겹쳐 그리기
-=====================================================================
+[연구실] Context Transformer 결과 영상 (발표용): 원본 vs 생성 vs SLERP
+==================================================================
 
 이 스크립트가 하는 일
 --------------------
 1. <ckpt 폴더>/config.yaml (기본 experiments/ctx_base/config.yaml) 에서 학습 때 쓴 설정을 읽는다.
-2. val 분할에서 클립 --n 개를 무작위로 고른다 (--seed).
+2. val 분할에서 클립 --n 개를 무작위로 고른다 (--seed). 영상 앞뒤를 채울 원본 프레임이
+   같은 BVH 안에 충분히 있는 클립만 고른다.
 3. scripts/train_context.py 의 validate() 와 "같은 함수" (src.training.context.eval_transition, gpos_l2)
    로 transition --trans 프레임을 생성한다: 자르기 → 정렬 → 정규화 → 모델 → 후처리 → 역정규화 → FK.
 4. 클립마다 검증 값 출력
-     - transition 구간 평균 위치 오차 (validate 의 val{trans}_gpos_l2 와 같은 식, 단위는 데이터 단위 cm)
+     - transition 구간 평균 위치 오차 (validate 의 val{trans}_gpos_l2 와 같은 식, 단위 cm)
      - context 구간 원본 vs 생성 최대 오차 (≈ 0 이어야 함. 모델 출력은 transition 에만 들어감)
+     - 앞뒤로 늘린 원본이 모델 창의 원본과 같은 좌표인지 (정렬 변환 일치, ≈ 0)
      - --slerp 이면 SLERP 기준선의 같은 오차
-5. 원본(파랑)·생성(빨강)·SLERP(회색, --slerp) 를 한 3D 화면에 겹친 30fps mp4 저장.
-   화면 위에 구간 이름 (context (입력) / transition (생성) / target) 과 프레임 번호.
-
-좌표는 학습과 같은 "정렬된" 좌표 (마지막 context 프레임 기준으로 루트가 +X 를 보게 회전·이동, Y 가 위).
+5. --total_frames (기본 300 = 10초, 30fps) 길이 mp4 저장.
+     [원본 재생] [context (입력)] [transition (생성)] [target] [원본 재생]
+   transition 이 영상 가운데 오도록 앞뒤를 같은 BVH 의 원본 프레임으로 채운다.
+   앞뒤 프레임에도 모델 창과 같은 정렬 변환 (마지막 context 프레임 기준 루트 XZ=0, +X 방향) 을 적용한다.
+   생성/SLERP 스켈레톤은 transition 밖에서는 원본과 같은 포즈.
+   --layout side   : 원본(파랑) 가운데, 생성(빨강) +offset, SLERP(회색) −offset (진행 방향 +X 에 수직인 Z 축)
+   --layout overlay: 세 개를 같은 자리에 겹쳐 그림
+   아래 패널: 프레임별 위치 오차 (생성/SLERP vs 원본), transition 배경 칠하기, 현재 프레임 커서.
 
 필요한 것: matplotlib, ffmpeg (sudo apt install ffmpeg). 한글 글꼴이 없으면 영어 라벨로 대신한다
 (sudo apt install fonts-nanum 또는 fonts-noto-cjk).
 
 실행 예:
-    python scripts/render_compare.py                                  # ctx_base best.pth, trans 30, 3개
-    python scripts/render_compare.py --trans 15 --n 5 --seed 1 --slerp
-    python scripts/render_compare.py --ckpt experiments/ctx_base/last.pth --out /tmp/videos
+    python scripts/render_compare.py --slerp                          # ctx_base best.pth, trans 30, 3개, 10초
+    python scripts/render_compare.py --trans 15 --n 5 --seed 1 --slerp --layout overlay
+    python scripts/render_compare.py --ckpt experiments/ctx_base/last.pth --total_frames 450 --offset 2.0
 """
 
 from __future__ import annotations
@@ -31,6 +37,7 @@ from __future__ import annotations
 import argparse
 import random
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -45,6 +52,7 @@ import torch  # noqa: E402
 from matplotlib import font_manager  # noqa: E402
 from matplotlib.animation import FFMpegWriter, writers  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
+from mpl_toolkits.mplot3d import proj3d  # noqa: E402
 from torch.utils.data import default_collate  # noqa: E402
 
 from src.config import load_env_config, load_yaml, require_dir, resolve_device, resolve_path  # noqa: E402
@@ -53,12 +61,20 @@ from src.data.representation import FeatureLayout, ZScoreNormalizer, decode_pose
 from src.data.rotations import matrix_to_quat, quat_to_matrix  # noqa: E402
 from src.data.skeleton import Skeleton  # noqa: E402
 from src.models.context_transformer import build_context_transformer  # noqa: E402
-from src.training.context import PreparedBatch, eval_transition, global_positions, gpos_l2  # noqa: E402
+from src.training.context import (  # noqa: E402
+    PreparedBatch,
+    eval_transition,
+    global_positions,
+    gpos_l2,
+    prepare_batch,
+)
 from src.training.context_inputs import TransitionSpec  # noqa: E402
 from src.training.utils import load_checkpoint  # noqa: E402
 
 FPS = 30
-COLORS = {"gt": "tab:blue", "pred": "tab:red", "slerp": "0.55"}
+UNITS_PER_METER = 100.0                     # LaFAN1 BVH 는 cm
+COLORS = {"gt": "tab:blue", "pred": "tab:red", "slerp": "0.5"}
+TRACK_ORDER = ("slerp", "gt", "pred")       # 나중에 그린 것이 위
 
 
 def parse_args() -> argparse.Namespace:
@@ -71,6 +87,11 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--seed", type=int, default=0, help="val 클립 고르기 시드")
     ap.add_argument("--out", type=Path, default=Path("experiments/ctx_base/videos"))
     ap.add_argument("--slerp", action="store_true", help="SLERP 기준선(회색)도 함께 그림")
+    ap.add_argument("--total_frames", "--total-frames", dest="total_frames", type=int, default=300,
+                    help="영상 전체 프레임 수 (30fps; 300 = 10초)")
+    ap.add_argument("--layout", choices=["side", "overlay"], default="side",
+                    help="side: 나란히 (원본 가운데), overlay: 겹쳐 그림")
+    ap.add_argument("--offset", type=float, default=1.5, help="side 배치 간격 (m)")
     ap.add_argument("--env", default=None, help="configs/env/<env>.yaml (기본: config.yaml 의 env)")
     ap.add_argument("--device", default=None, help="예) cpu, cuda:0 (기본: env 설정)")
     ap.add_argument("--dpi", type=int, default=100)
@@ -113,6 +134,40 @@ def slerp_baseline(pb: PreparedBatch, spec: TransitionSpec, skel: Skeleton, layo
 
 
 # -----------------------------------------------------------------------------
+# 앞뒤로 늘린 원본 (같은 정렬 변환)
+# -----------------------------------------------------------------------------
+def padding_frames(total: int, ctx: int, trans: int) -> tuple[int, int]:
+    """(pre, post): 모델 창 [context | transition | target] 앞/뒤에 붙일 원본 프레임 수.
+
+    transition 의 가운데가 영상 가운데 (total // 2) 에 오도록 pre 를 정한다.
+    """
+    shown = ctx + trans + 1
+    pre = total // 2 - ctx - trans // 2
+    post = total - pre - shown
+    if pre < 0 or post < 1:                    # post ≥ 1: 후처리에 쓰는 target 다음 프레임
+        raise ValueError(f"--total_frames {total} 가 너무 짧습니다 (context {ctx} + trans {trans} + 2 이상, "
+                         f"가운데 정렬 위해 {2 * (ctx + trans // 2) + 2} 이상 권장).")
+    return pre, post
+
+
+def extended_batch(ds: LafanDataset, clips: list[tuple[int, int]], pre: int, total: int) -> dict:
+    """clips [(파일 번호, 클립 시작)] → 시작 pre 프레임 전부터 total 프레임 (LafanDataset 배치와 같은 key)."""
+    items = []
+    for fi, start in clips:
+        sl = slice(start - pre, start - pre + total)
+        items.append({"root_pos": ds.root_pos[fi][sl], "local_rot": ds.local_rot[fi][sl],
+                      "offsets": ds.offsets[fi]})
+    return default_collate(items)
+
+
+def splice(full: torch.Tensor, window: torch.Tensor, pre: int, frames: slice) -> torch.Tensor:
+    """full (B, total, J, 3) 원본에 window (B, L, J, 3) 의 frames 구간만 덮어쓴다."""
+    out = full.clone()
+    out[:, pre + frames.start:pre + frames.stop] = window[:, frames]
+    return out
+
+
+# -----------------------------------------------------------------------------
 # 그리기
 # -----------------------------------------------------------------------------
 def pick_korean_font() -> bool:
@@ -131,76 +186,137 @@ def to_plot(p: np.ndarray) -> np.ndarray:
     return np.stack([p[..., 0], -p[..., 2], p[..., 1]], axis=-1)
 
 
-def render_video(path: Path, tracks: dict[str, np.ndarray], parents, spec: TransitionSpec,
-                 title: str, korean: bool, dpi: int) -> None:
-    """tracks: {"gt"|"pred"|"slerp": (F, J, 3) 데이터 좌표}. 프레임 0..target 을 그린다."""
-    labels = ({"gt": "원본", "pred": "생성 (Context Transformer)", "slerp": "SLERP"} if korean
-              else {"gt": "original", "pred": "generated (Context Transformer)", "slerp": "SLERP"})
-    phase_names = (("context (입력)", "transition (생성)", "target") if korean
-                   else ("context (input)", "transition (generated)", "target"))
-    n_frames = spec.target_idx + 1
-    pts = {k: to_plot(v[:n_frames]) for k, v in tracks.items()}
+def fit_box(fig, ax, lo: np.ndarray, hi: np.ndarray, band: tuple[float, float, float, float]) -> None:
+    """3D 상자 (lo~hi) 가 화면 영역 band = (x0, y0, x1, y1) (figure 비율) 를 최대한 채우게 한다.
 
-    # 고정 카메라 범위: 모든 스켈레톤·모든 프레임이 들어가게, 축 비율 1:1:1
+    matplotlib 3D 축은 항상 정사각형 영역에 그려서, 길고 납작한 장면은 넓은 화면을 다 못 쓴다.
+    그래서 축을 그림보다 큰 정사각형으로 두고, 상자 꼭짓점 8개의 화면 위치를 재서 zoom 과 축 위치를 맞춘다.
+    """
+    W, H = fig.get_size_inches() * fig.dpi
+    side = max(W, H) * 1.5
+    ax.set_position([0.5 - side / W / 2, 0.5 - side / H / 2, side / W, side / H])
+    zoom = 1.0
+    ax.set_box_aspect(tuple(hi - lo), zoom=zoom)
+    corners = np.array(np.meshgrid(*zip(lo, hi), indexing="ij")).reshape(3, -1)
+    bx0, by0, bx1, by1 = band
+    for _ in range(2):                                   # 1) 크기 맞추기 2) 위치 맞추기
+        fig.canvas.draw()
+        xs, ys, _ = proj3d.proj_transform(*corners, ax.M)
+        d = ax.transData.transform(np.c_[xs, ys]) / [W, H]          # figure 비율
+        w, h = np.ptp(d[:, 0]), np.ptp(d[:, 1])
+        k = min((bx1 - bx0) / w, (by1 - by0) / h)
+        pos = ax.get_position()
+        dx = (bx0 + bx1) / 2 - (d[:, 0].min() + d[:, 0].max()) / 2 * k - (1 - k) * (pos.x0 + pos.width / 2)
+        dy = (by0 + by1) / 2 - (d[:, 1].min() + d[:, 1].max()) / 2 * k - (1 - k) * (pos.y0 + pos.height / 2)
+        zoom *= k
+        ax.set_box_aspect(tuple(hi - lo), zoom=zoom)
+        ax.set_position([pos.x0 + dx, pos.y0 + dy, pos.width, pos.height])
+
+
+def render_video(path: Path, tracks: dict[str, np.ndarray], errors: dict[str, np.ndarray], parents,
+                 head: int, phases: list[tuple[str, int, int]], trans_range: tuple[int, int],
+                 title: str, korean: bool, layout: str, offset: float, dpi: int) -> None:
+    """tracks: {"gt"|"pred"|"slerp": (F, J, 3) 데이터 좌표, 같은 정렬}. errors: {"pred"|"slerp": (F,) cm}.
+    phases: [(이름, 시작, 끝(포함 안 함))], trans_range: transition [시작, 끝).
+    """
+    names = ({"gt": "원본", "pred": "생성", "slerp": "SLERP"} if korean
+             else {"gt": "original", "pred": "generated", "slerp": "SLERP"})
+    long_names = ({"gt": "원본", "pred": "생성 (Context Transformer)", "slerp": "SLERP 기준선"} if korean
+                  else {"gt": "original", "pred": "generated (Context Transformer)", "slerp": "SLERP baseline"})
+    n_frames = next(iter(tracks.values())).shape[0]
+    shift = {"gt": 0.0, "pred": offset, "slerp": -offset} if layout == "side" else {}
+    pts = {}
+    for k, v in tracks.items():
+        v = v.copy()
+        v[..., 2] += shift.get(k, 0.0)                         # 진행 방향(+X) 에 수직인 Z 축으로 띄움
+        pts[k] = to_plot(v)
+    order = [k for k in TRACK_ORDER if k in pts]
+
+    # 고정 카메라 범위: 모든 스켈레톤·모든 프레임이 들어가게, 축 단위 비율 같게
     allp = np.concatenate([p.reshape(-1, 3) for p in pts.values()])
     lo, hi = allp.min(0), allp.max(0)
     floor_h = min(0.0, float(lo[2]))
-    lo[2] = floor_h
-    center, half = (lo + hi) / 2, (hi - lo).max() / 2 * 1.1
-    lo, hi = center - half, center + half
-    lo[2], hi[2] = floor_h, floor_h + 2 * half
+    margin = 0.15 * UNITS_PER_METER
+    lo, hi = lo - margin, hi + margin
+    lo[2], hi[2] = floor_h, hi[2] + 0.2 * UNITS_PER_METER      # 이름표 공간
+    span = hi - lo
 
-    fig = plt.figure(figsize=(8, 8))
-    ax = fig.add_subplot(111, projection="3d")
+    fig = plt.figure(figsize=(12.8, 9.0))
+    ax = fig.add_axes([0, 0, 1, 1], projection="3d")
     ax.set_xlim(lo[0], hi[0])
     ax.set_ylim(lo[1], hi[1])
     ax.set_zlim(lo[2], hi[2])
-    ax.set_box_aspect((1, 1, 1))
-    ax.view_init(elev=15, azim=-60)
-    ax.set_xlabel("X")
-    ax.set_ylabel("-Z")
-    ax.set_zlabel("Y (up)")
+    ax.set_proj_type("ortho")
+    ax.computed_zorder = False                                 # 바닥이 뼈를 덮지 않게 직접 순서 지정
+    ax.view_init(elev=24, azim=-50)                            # 비스듬히: 진행(+X)·옆(Z) 둘 다 보이게
+    ax.set_axis_off()
+    ax.patch.set_alpha(0.0)
+    fit_box(fig, ax, lo, hi, band=(0.02, 0.27, 0.98, 0.90))
 
-    # 바닥 평면 (한 번만)
-    gx, gy = np.meshgrid(np.linspace(lo[0], hi[0], 2), np.linspace(lo[1], hi[1], 2))
-    ax.plot_surface(gx, gy, np.full_like(gx, floor_h), color="0.85", alpha=0.5, shade=False, zorder=0)
-    for v in np.linspace(lo[0], hi[0], 11):
-        ax.plot([v, v], [lo[1], hi[1]], [floor_h, floor_h], color="0.7", lw=0.5)
-    for v in np.linspace(lo[1], hi[1], 11):
-        ax.plot([lo[0], hi[0]], [v, v], [floor_h, floor_h], color="0.7", lw=0.5)
+    # 바닥 평면 + 1 m 격자 (한 번만)
+    gx, gy = np.meshgrid([lo[0], hi[0]], [lo[1], hi[1]])
+    ax.plot_surface(gx, gy, np.full_like(gx, floor_h), color="0.92", shade=False, zorder=0)
+    step = UNITS_PER_METER
+    for v in np.arange(np.ceil(lo[0] / step) * step, hi[0], step):
+        ax.plot([v, v], [lo[1], hi[1]], [floor_h, floor_h], color="0.78", lw=0.6, zorder=1)
+    for v in np.arange(np.ceil(lo[1] / step) * step, hi[1], step):
+        ax.plot([lo[0], hi[0]], [v, v], [floor_h, floor_h], color="0.78", lw=0.6, zorder=1)
 
-    # 뼈 선: 처음에 한 번만 만들고 매 프레임 set_data / set_3d_properties 로 갱신
+    # 뼈 선 / 이름표: 처음에 한 번만 만들고 매 프레임 갱신
     bones = [(j, p) for j, p in enumerate(parents) if p >= 0]
-    order = [k for k in ("slerp", "gt", "pred") if k in pts]    # 나중에 그린 것이 위
-    lines = {k: [ax.plot([0, 0], [0, 0], [0, 0], color=COLORS[k], lw=2.5 if k != "slerp" else 2.0,
-                         alpha=0.9 if k != "pred" else 0.85, solid_capstyle="round")[0] for _ in bones]
+    lines = {k: [ax.plot([0, 0], [0, 0], [0, 0], color=COLORS[k], lw=4.0 if k != "slerp" else 3.5,
+                         alpha=0.95 if k != "pred" or layout == "side" else 0.8,
+                         solid_capstyle="round", zorder=3 + order.index(k))[0] for _ in bones]
              for k in order}
-    ax.legend(handles=[Line2D([], [], color=COLORS[k], lw=3, label=labels[k]) for k in ("gt", "pred", "slerp")
-                       if k in pts], loc="upper right")
+    tags = {}
+    if layout == "side":
+        for k in order:
+            tags[k] = ax.text(0, 0, 0, names[k], color=COLORS[k], fontsize=13, weight="bold",
+                              ha="center", va="bottom", zorder=10)
+    else:
+        fig.legend(handles=[Line2D([], [], color=COLORS[k], lw=3, label=long_names[k])   # 3D 축은 그림보다 커서 fig 기준
+                            for k in ("gt", "pred", "slerp") if k in pts],
+                   loc="upper right", bbox_to_anchor=(0.97, 0.90), fontsize=12, frameon=False)
 
-    fig.suptitle(title, fontsize=10)
-    phase_txt = fig.text(0.05, 0.93, "", fontsize=15, weight="bold")
-    frame_txt = fig.text(0.05, 0.895, "", fontsize=11)
+    fig.text(0.5, 0.965, title, ha="center", fontsize=10, color="0.3")
+    phase_txt = fig.text(0.06, 0.925, "", fontsize=18, weight="bold")
+    frame_txt = fig.text(0.97, 0.925, "", fontsize=12, ha="right", family="monospace")
 
-    writer = FFMpegWriter(fps=FPS, bitrate=2400)
+    # 아래 패널: 프레임별 위치 오차
+    ex = fig.add_axes([0.06, 0.07, 0.91, 0.17], zorder=2)
+    t0, t1 = trans_range
+    ex.axvspan(t0 - 0.5, t1 - 0.5, color=COLORS["pred"], alpha=0.08, lw=0)
+    for _, a, _b in phases[1:]:
+        ex.axvline(a - 0.5, color="0.8", lw=0.8, ls=":")
+    ymax = 1.0
+    for k in ("slerp", "pred"):
+        if k in errors:
+            ex.plot(np.arange(n_frames), errors[k], color=COLORS[k], lw=2, label=long_names[k])
+            ymax = max(ymax, float(errors[k].max()))
+    ex.set_xlim(0, n_frames - 1)
+    ex.set_ylim(0, ymax * 1.15)
+    ex.set_ylabel("위치 오차 (cm)" if korean else "pos. error (cm)")
+    ex.set_xlabel("frame")
+    ex.legend(loc="upper right", fontsize=9, frameon=False)
+    ex.grid(alpha=0.3)
+    cursor = ex.axvline(0, color="black", lw=1.2)
+
+    writer = FFMpegWriter(fps=FPS, bitrate=4000)
     with writer.saving(fig, str(path), dpi):
         for f in range(n_frames):
-            if f < spec.context_len:
-                ph, color = phase_names[0], "black"
-            elif f < spec.target_idx:
-                ph, color = phase_names[1], COLORS["pred"]
-            else:
-                ph, color = phase_names[2], "black"
+            ph = next(name for name, a, b in phases if a <= f < b)
             phase_txt.set_text(ph)
-            phase_txt.set_color(color)
-            frame_txt.set_text(f"frame {f:3d} / {n_frames - 1}   "
-                               f"(context 0–{spec.context_len - 1}, transition {spec.context_len}–"
-                               f"{spec.target_idx - 1}, target {spec.target_idx})")
+            phase_txt.set_color(COLORS["pred"] if t0 <= f < t1 else "black")
+            frame_txt.set_text(f"frame {f:3d} / {n_frames - 1}   {f / FPS:5.2f} s")
             for k in order:
                 P = pts[k][f]
                 for ln, (j, p) in zip(lines[k], bones):
                     ln.set_data([P[p, 0], P[j, 0]], [P[p, 1], P[j, 1]])
                     ln.set_3d_properties([P[p, 2], P[j, 2]])
+                if k in tags:
+                    h = P[head]
+                    tags[k].set_position_3d((h[0], h[1], h[2] + 0.18 * UNITS_PER_METER))
+            cursor.set_xdata([f, f])
             writer.grab_frame()
     plt.close(fig)
 
@@ -230,12 +346,14 @@ def main() -> None:
     skel = Skeleton.from_yaml(resolve_path(data_cfg["skeleton"]))
     layout = FeatureLayout(skel.num_joints)
     norm = ZScoreNormalizer.load(resolve_path(cfg["stats"])).to(device=device, dtype=torch.float32)
+    head = skel.names.index("Head") if "Head" in skel.names else skel.num_joints - 1
 
     split = cfg["train"].get("val_split", "val")
     sp = data_cfg["splits"][split]
-    ctx = data_cfg["context_len"]
-    if ctx + args.trans + 2 > sp["window"]:
-        raise ValueError(f"trans {args.trans}: {split} window {sp['window']} < context {ctx} + trans + 2")
+    ctx, trans, total = data_cfg["context_len"], args.trans, args.total_frames
+    if ctx + trans + 2 > sp["window"]:
+        raise ValueError(f"trans {trans}: {split} window {sp['window']} < context {ctx} + trans + 2")
+    pre, post = padding_frames(total, ctx, trans)
     val_ds = LafanDataset(require_dir(env["paths"]["lafan1_bvh_dir"], "LaFAN1 BVH 폴더"), sp["actors"],
                           sp["window"], sp["offset"], skel, start_frame=sp["start_frame"],
                           contact_threshold=data_cfg["contact_vel_threshold"],
@@ -247,54 +365,92 @@ def main() -> None:
     model.load_state_dict(ckpt["model"])
     model.eval()
     print(f"체크포인트 {ckpt_path} (iteration {ckpt['iteration']}, best_val {ckpt['best_val']:.4f}), "
-          f"device={device}, {split} 클립 {len(val_ds)}, trans {args.trans}")
+          f"device={device}, {split} 클립 {len(val_ds)}, trans {trans}")
 
-    # ----- 클립 고르기 → 생성 (validate() 와 같은 함수) -----
-    idx = sorted(random.Random(args.seed).sample(range(len(val_ds)), min(args.n, len(val_ds))))
+    # ----- 클립 고르기: 앞 pre / 뒤 (total - pre) 프레임이 같은 BVH 안에 있는 클립만 -----
+    ok = []
+    for i in range(len(val_ds)):
+        fi, start = val_ds.locate(i)
+        if start - pre >= 0 and start - pre + total <= val_ds.frames[fi]:
+            ok.append(i)
+    if not ok:
+        raise ValueError(f"앞뒤 여유 (앞 {pre}, 뒤 {total - pre} 프레임) 가 있는 {split} 클립이 없습니다. "
+                         f"--total_frames 를 줄이세요.")
+    idx = sorted(random.Random(args.seed).sample(ok, min(args.n, len(ok))))
+    clips = [val_ds.locate(i) for i in idx]
+    print(f"영상 {total} 프레임 ({total / FPS:.1f}초) = 원본 {pre} + context {ctx} + transition {trans} + "
+          f"target 1 + 원본 {post}  "
+          f"(앞뒤 여유 있는 클립 {len(ok)}/{len(val_ds)} 중 {len(idx)}개)")
+
+    # ----- 생성 (validate() 와 같은 함수) -----
     batch = default_collate([val_ds[i] for i in idx])
-    pb, spec, _, gpos = eval_transition(model, batch, args.trans, data_cfg, skel, layout, norm, device)
+    pb, spec, _, gpos = eval_transition(model, batch, trans, data_cfg, skel, layout, norm, device)
     gpos_slerp = slerp_baseline(pb, spec, skel, layout) if args.slerp else None
-    ctx_frames = slice(0, spec.context_len)
+
+    # ----- 앞뒤로 늘린 원본: 같은 정렬 (기준 프레임 = 늘린 시퀀스의 pre + ctx − 1 = 창의 ctx − 1) -----
+    pb_full = prepare_batch(extended_batch(val_ds, clips, pre, total), skel, norm, pre + ctx,
+                            data_cfg["forward_world_axis"], device)
+    gt_full = pb_full.gpos_gt                                    # (B, total, J, 3)
+    L = pb.gpos_gt.shape[1]
+    align_err = float((gt_full[:, pre:pre + L] - pb.gpos_gt).norm(dim=-1).max())
+    pred_full = splice(gt_full, gpos, pre, spec.seq_slice)      # transition 밖은 원본 포즈
+    slerp_full = splice(gt_full, gpos_slerp, pre, spec.seq_slice) if gpos_slerp is not None else None
 
     korean = pick_korean_font()
     if not korean:
         print("[알림] 한글 글꼴이 없어 영상 라벨을 영어로 씁니다 (sudo apt install fonts-nanum).")
+    ph = (("원본 재생", "context (입력)", "transition (생성)", "target", "원본 재생") if korean
+          else ("original", "context (input)", "transition (generated)", "target", "original"))
+    t0, t1 = pre + ctx, pre + spec.target_idx
+    phases = [(ph[0], 0, pre), (ph[1], pre, t0), (ph[2], t0, t1), (ph[3], t1, t1 + 1), (ph[4], t1 + 1, total)]
     out_dir = resolve_path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+    ctx_frames = slice(0, spec.context_len)
 
     l2_all, l2_slerp_all = [], []
-    for b, i in enumerate(idx):
-        fi, start = val_ds.locate(i)
+    for b, (fi, start) in enumerate(clips):
         name = val_ds.files[fi].stem
-        frame0 = start + val_ds.start_frame                      # 원본 BVH 프레임 번호
+        frame0 = start + val_ds.start_frame                      # 모델 창 첫 프레임의 원본 BVH 번호
         one = slice(b, b + 1)
         gt, pred = pb.gpos_gt[one], gpos[one]
         l2 = float(gpos_l2(pred, gt, spec.seq_slice))
         ctx_err = float((pred[:, ctx_frames] - gt[:, ctx_frames]).norm(dim=-1).max())
         tgt_err = float((pred[:, spec.target_idx] - gt[:, spec.target_idx]).norm(dim=-1).max())
+        a_err = float((gt_full[one, pre:pre + L] - gt).norm(dim=-1).max())
         l2_all.append(l2)
-        print(f"\n[{b + 1}/{len(idx)}] {name} 프레임 {frame0}–{frame0 + spec.target_idx} (val 클립 #{i})")
+        print(f"\n[{b + 1}/{len(clips)}] {name} 모델 창 프레임 {frame0}–{frame0 + spec.target_idx}, "
+              f"영상 프레임 {frame0 - pre}–{frame0 - pre + total - 1} (val 클립 #{idx[b]})")
         print(f"  transition 평균 위치 오차 (gpos_l2): {l2:.4f}")
         print(f"  context 구간 원본 vs 생성 최대 오차: {ctx_err:.2e} → "
               f"{'OK (완전히 같음)' if ctx_err < 1e-4 else '경고: context 가 원본과 다름!'}"
               f"   (target 프레임 최대 오차 {tgt_err:.2e})")
-        tracks = {"gt": gt[0].cpu().numpy(), "pred": pred[0].cpu().numpy()}
-        if gpos_slerp is not None:
+        print(f"  앞뒤 원본 정렬 일치 (늘린 원본 vs 모델 창 원본) 최대 오차: {a_err:.2e} → "
+              f"{'OK' if a_err < 1e-3 else '경고: 정렬 변환이 다름!'}")
+
+        tracks = {"gt": gt_full[b].cpu().numpy(), "pred": pred_full[b].cpu().numpy()}
+        errors = {"pred": (pred_full[b] - gt_full[b]).norm(dim=-1).mean(-1).cpu().numpy()}
+        title = f"{name}  frame {frame0 - pre}–{frame0 - pre + total - 1}  |  trans {trans}  |  gpos_l2 {l2:.2f} cm"
+        if slerp_full is not None:
             l2s = float(gpos_l2(gpos_slerp[one], gt, spec.seq_slice))
             l2_slerp_all.append(l2s)
             print(f"  SLERP 기준선 gpos_l2: {l2s:.4f}")
-            tracks["slerp"] = gpos_slerp[b].cpu().numpy()
+            tracks["slerp"] = slerp_full[b].cpu().numpy()
+            errors["slerp"] = (slerp_full[b] - gt_full[b]).norm(dim=-1).mean(-1).cpu().numpy()
+            title += f" (SLERP {l2s:.2f})"
+        title += f"  |  {ckpt_path.parent.name}/{ckpt_path.name} it {ckpt['iteration']}"
 
-        path = out_dir / f"{b:02d}_{name}_f{frame0}_trans{args.trans}{'_slerp' if args.slerp else ''}.mp4"
-        title = (f"{name}  frame {frame0}  |  trans {args.trans}  |  gpos_l2 {l2:.2f}"
-                 + (f"  (SLERP {l2_slerp_all[-1]:.2f})" if gpos_slerp is not None else "")
-                 + f"  |  {ckpt_path.parent.name}/{ckpt_path.name} it {ckpt['iteration']}")
-        render_video(path, tracks, skel.parents, spec, title, korean, args.dpi)
-        print(f"  저장: {path}")
+        path = out_dir / (f"{b:02d}_{name}_f{frame0}_trans{trans}_{args.layout}"
+                          f"{'_slerp' if args.slerp else ''}.mp4")
+        tic = time.time()
+        render_video(path, tracks, errors, skel.parents, head, phases, (t0, t1), title, korean,
+                     args.layout, args.offset * UNITS_PER_METER, args.dpi)
+        print(f"  저장: {path}  ({time.time() - tic:.0f}초)")
 
-    print(f"\n{len(idx)}개 평균 gpos_l2 (trans {args.trans}): {np.mean(l2_all):.4f}"
+    print(f"\n{len(clips)}개 평균 gpos_l2 (trans {trans}): {np.mean(l2_all):.4f}"
           + (f", SLERP {np.mean(l2_slerp_all):.4f}" if l2_slerp_all else "")
           + "  ※ 클립 몇 개의 평균이라 log.csv 의 val 전체 평균과는 다를 수 있음")
+    if align_err >= 1e-3:
+        print(f"[경고] 앞뒤 원본 정렬 최대 오차 {align_err:.2e}")
 
 
 if __name__ == "__main__":

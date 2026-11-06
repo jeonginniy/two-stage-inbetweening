@@ -106,18 +106,25 @@ tail -f ctx_base.out
 3. `best.pth` 의 iteration 과 그때의 `val30_gpos_l2` (cm)
    (공식 L2P/L2Q/NPSS 비교는 4단계에서 구현)
 
-### 5. 결과 영상 (원본 vs 생성)
+### 5. 결과 영상 (원본 vs 생성, 발표용)
 
 ```bash
 pip install matplotlib                      # 처음 한 번 (ffmpeg 도 필요: sudo apt install ffmpeg)
-python scripts/render_compare.py                         # best.pth, trans 30, 3개 → experiments/ctx_base/videos/
-python scripts/render_compare.py --trans 15 --n 5 --seed 1 --slerp
+python scripts/render_compare.py --slerp                  # best.pth, trans 30, 3개, 10초 → experiments/ctx_base/videos/
+python scripts/render_compare.py --trans 15 --n 5 --seed 1 --slerp --layout overlay
+python scripts/render_compare.py --slerp --total_frames 450 --offset 2.0
 ```
 
+- 영상: `--total_frames` (기본 300 = 10초, 30fps). `원본 재생 | context (입력) | transition (생성) | target | 원본 재생`.
+  transition 이 영상 가운데 오도록 앞뒤를 같은 BVH 의 원본으로 채운다 (여유가 없는 클립은 고르지 않음).
+  앞뒤 프레임도 모델 창과 같은 정렬 (마지막 context 프레임 기준, `prepare_batch` 재사용) 이라 좌표가 이어진다.
+- `--layout side` (기본): 원본(파랑) 가운데, 생성(빨강) +`--offset` m, SLERP(회색) −offset (진행 방향 +X 에 수직인 Z 로).
+  `--layout overlay`: 겹쳐 그림. 아래 패널은 프레임별 위치 오차 (cm) 와 현재 프레임 커서.
 - 설정은 `experiments/ctx_base/config.yaml` (`--ckpt` 폴더의 config.yaml) 에서 읽는다.
 - 생성은 `validate()` 와 같은 함수 (`src.training.context.eval_transition`, `gpos_l2`) 를 쓴다.
   출력되는 클립별 `gpos_l2` 는 `log.csv` 의 `val{trans}_gpos_l2` 와 같은 식 (클립 몇 개 평균이라 값은 다를 수 있음).
-- `context 구간 ... 최대 오차` 가 0 (≈1e-6 이하) 이 아니면 버그.
+- `context 구간 ... 최대 오차`, `앞뒤 원본 정렬 일치 ... 최대 오차` 가 ≈1e-5 cm 이하가 아니면 버그.
+- 연구실 RTX 3070 에서 영상 1개 (300프레임) 약 18초.
 
 ### 데이터 없이 동작만 확인 (노트북/이 환경)
 
