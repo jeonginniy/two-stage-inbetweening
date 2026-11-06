@@ -11,6 +11,7 @@
 | `compute_stats.py` | 연구실 🔬 | z-score 통계 μ, σ 계산 → `data/cache/stats/lafan1_context_stats.npz` (논문 3.6.1) |
 | `compare_stats_with_official.py` | 연구실 🔬 | 내 통계 vs 공식 저장소의 `tests/train_stats_context.pkl` 차원별 비교 |
 | `train_context.py` | 연구실 🔬 / 노트북 (`--fake-data`) | **2단계** Context Transformer 학습 (논문 3.3, 3.5, 3.6). 체크포인트·로그를 `experiments/<run>/` 에 저장 |
+| `render_compare.py` | 연구실 🔬 | 학습된 모델로 val 클립 transition 생성 → 원본(파랑)/생성(빨강)/SLERP(회색, `--slerp`) 겹친 30fps mp4. 클립별 gpos_l2 와 context 일치 여부 출력 |
 
 🔬 = 실제 LaFAN1 이 필요. 노트북에서 실행하면 "경로가 null" 메시지를 내고 종료한다 (정상).
 
@@ -104,6 +105,19 @@ tail -f ctx_base.out
 2. 본 학습 `log.csv` 의 train `loss/rot/pos/smooth` 와 val `val5/15/30_loss`, `val*_gpos_l2` 추이
 3. `best.pth` 의 iteration 과 그때의 `val30_gpos_l2` (cm)
    (공식 L2P/L2Q/NPSS 비교는 4단계에서 구현)
+
+### 5. 결과 영상 (원본 vs 생성)
+
+```bash
+pip install matplotlib                      # 처음 한 번 (ffmpeg 도 필요: sudo apt install ffmpeg)
+python scripts/render_compare.py                         # best.pth, trans 30, 3개 → experiments/ctx_base/videos/
+python scripts/render_compare.py --trans 15 --n 5 --seed 1 --slerp
+```
+
+- 설정은 `experiments/ctx_base/config.yaml` (`--ckpt` 폴더의 config.yaml) 에서 읽는다.
+- 생성은 `validate()` 와 같은 함수 (`src.training.context.eval_transition`, `gpos_l2`) 를 쓴다.
+  출력되는 클립별 `gpos_l2` 는 `log.csv` 의 `val{trans}_gpos_l2` 와 같은 식 (클립 몇 개 평균이라 값은 다를 수 있음).
+- `context 구간 ... 최대 오차` 가 0 (≈1e-6 이하) 이 아니면 버그.
 
 ### 데이터 없이 동작만 확인 (노트북/이 환경)
 

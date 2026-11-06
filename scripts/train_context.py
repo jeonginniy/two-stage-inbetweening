@@ -55,8 +55,8 @@ from src.data.dataset import LafanDataset  # noqa: E402
 from src.data.representation import FeatureLayout, ZScoreNormalizer  # noqa: E402
 from src.data.skeleton import Skeleton  # noqa: E402
 from src.models.context_transformer import build_context_transformer, count_parameters  # noqa: E402
-from src.training.context import context_forward, global_positions, infer_context, prepare_batch  # noqa: E402
-from src.training.context_inputs import TransitionSpec, sample_transition  # noqa: E402
+from src.training.context import context_forward, eval_transition, gpos_l2, prepare_batch  # noqa: E402
+from src.training.context_inputs import sample_transition  # noqa: E402
 from src.training.utils import (  # noqa: E402
     amp_dtype_from_str,
     infinite_batches,
@@ -145,21 +145,16 @@ def validate(model, loader, trans_list, data_cfg, skel, layout, norm, loss_w, de
     """val 분할에서 transition 길이별 손실 (학습과 같은 식, 후처리 없음) 과
     전역 관절 위치 평균 L2 오차 (cm, 후처리 포함) 를 계산한다.
     """
-    ctx = data_cfg["context_len"]
     sums: dict[str, float] = {}
     n_batches = 0
     model.eval()
     for batch in loader:
         n_batches += 1
         for trans in trans_list:
-            L = ctx + trans + 2                                  # target 다음 프레임까지 (후처리용)
-            cut = {k: (v[:, :L] if k in ("root_pos", "local_rot") else v) for k, v in batch.items()}
-            pb = prepare_batch(cut, skel, norm, ctx, data_cfg["forward_world_axis"], device)
-            spec = TransitionSpec(ctx, ctx + trans)
+            # 자르기 → 정렬 → 추론(후처리) → FK. scripts/render_compare.py 도 같은 함수를 쓴다.
+            pb, spec, _, gpos = eval_transition(model, batch, trans, data_cfg, skel, layout, norm, device)
             losses = context_forward(model, pb, spec, skel, layout, norm, loss_w)
-            y = infer_context(model, pb.x_gt, spec, layout, use_postprocess=True)
-            gpos = global_positions(norm.denormalize(y), pb.offsets, skel, layout)
-            l2 = (gpos[:, spec.seq_slice] - pb.gpos_gt[:, spec.seq_slice]).norm(dim=-1).mean()
+            l2 = gpos_l2(gpos, pb.gpos_gt, spec.seq_slice)
             for k, v in losses.items():
                 sums[f"val{trans}_{k}"] = sums.get(f"val{trans}_{k}", 0.0) + float(v)
             sums[f"val{trans}_gpos_l2"] = sums.get(f"val{trans}_gpos_l2", 0.0) + float(l2)

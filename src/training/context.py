@@ -143,3 +143,35 @@ def infer_context(
         y = postprocess(y, x_gt, spec)
     model.train(was_training)
     return y
+
+
+@torch.no_grad()
+def eval_transition(
+    model: nn.Module,
+    batch: dict,
+    trans: int,
+    data_cfg: dict,
+    skeleton: Skeleton,
+    layout: FeatureLayout,
+    normalizer: ZScoreNormalizer,
+    device: torch.device | str | None = None,
+) -> tuple[PreparedBatch, TransitionSpec, Tensor, Tensor]:
+    """검증/시각화 공통: LafanDataset 배치 → transition `trans` 프레임 생성 (후처리 포함).
+
+    클립을 ctx + trans + 2 프레임 (target 다음 프레임까지, 후처리용) 으로 자른 뒤
+    prepare_batch → infer_context → 역정규화 → FK.
+    출력: (pb, spec, y 정규화된 예측 (B, L, D), gpos 예측 전역 관절 위치 (B, L, J, 3))
+    """
+    ctx = data_cfg["context_len"]
+    L = ctx + trans + 2
+    cut = {k: (v[:, :L] if k in ("root_pos", "local_rot") else v) for k, v in batch.items()}
+    pb = prepare_batch(cut, skeleton, normalizer, ctx, data_cfg["forward_world_axis"], device)
+    spec = TransitionSpec(ctx, ctx + trans)
+    y = infer_context(model, pb.x_gt, spec, layout, use_postprocess=True)
+    gpos = global_positions(normalizer.denormalize(y), pb.offsets, skeleton, layout)
+    return pb, spec, y, gpos
+
+
+def gpos_l2(gpos: Tensor, gpos_gt: Tensor, frames: slice) -> Tensor:
+    """전역 관절 위치 평균 L2 오차: 관절별 유클리드 거리를 (배치, 프레임, 관절) 전체에서 평균."""
+    return (gpos[:, frames] - gpos_gt[:, frames]).norm(dim=-1).mean()
