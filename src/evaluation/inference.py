@@ -193,6 +193,23 @@ def cut_batch(batch: dict, start: int, length: int) -> dict:
 
 
 @torch.no_grad()
+def prepare_window(run: LoadedRun, batch: dict, trans: int) -> tuple[PreparedBatch, TransitionSpec]:
+    """배치 → 모델 창 L = ctx + trans + 2 프레임의 정렬된 정답과 TransitionSpec (모델·기준선 공용).
+
+    입력:  batch {"root_pos" (B,W,3), "local_rot" (B,W,J,3,3), "offsets" (B,J,3), ...}, W ≥ L
+    출력:  (pb, spec)  pb.x_gt (B,L,D) 정규화, pb.x_gt_raw (B,L,D), pb.gpos_gt (B,L,J,3), pb.offsets (B,1,J,3)
+    """
+    ctx = run.ctx
+    L = ctx + trans + 2
+    W = batch["root_pos"].shape[1]
+    if W < L:
+        raise ValueError(f"trans {trans}: 클립 길이 {W} < context {ctx} + trans + 2 = {L}")
+    pb = prepare_batch(cut_batch(batch, 0, L), run.skel, run.norm, ctx,
+                       run.data_cfg["forward_world_axis"], run.device)
+    return pb, TransitionSpec(ctx, ctx + trans)
+
+
+@torch.no_grad()
 def generate(run: LoadedRun, batch: dict, trans: int, use_postprocess: bool = True) -> Generation:
     """LafanDataset 배치 → transition `trans` 프레임 생성 (논문 3.3, 후처리 식 23).
 
@@ -207,14 +224,7 @@ def generate(run: LoadedRun, batch: dict, trans: int, use_postprocess: bool = Tr
         trans : transition 길이 (1 이상, 학습 범위 밖이어도 됨)
     출력:  Generation
     """
-    ctx = run.ctx
-    L = ctx + trans + 2
-    W = batch["root_pos"].shape[1]
-    if W < L:
-        raise ValueError(f"trans {trans}: 클립 길이 {W} < context {ctx} + trans + 2 = {L}")
-    pb = prepare_batch(cut_batch(batch, 0, L), run.skel, run.norm, ctx,
-                       run.data_cfg["forward_world_axis"], run.device)
-    spec = TransitionSpec(ctx, ctx + trans)
+    pb, spec = prepare_window(run, batch, trans)
     y = infer_context(run.model, pb.x_gt, spec, run.layout, use_postprocess=use_postprocess)
     gpos = global_positions(run.norm.denormalize(y), pb.offsets, run.skel, run.layout)
     return Generation(pb, spec, y, gpos)

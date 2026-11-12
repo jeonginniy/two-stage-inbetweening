@@ -71,6 +71,7 @@ from src.training.context_inputs import TransitionSpec  # noqa: E402
 from src.training.utils import load_checkpoint  # noqa: E402
 # 그리기 도우미는 4단계 시각화 모듈과 공유 (scripts/render_samples.py 도 사용)
 from src.visualization.skeleton_video import fit_box, pick_korean_font, to_plot  # noqa: E402
+from src.evaluation.baselines import slerp  # noqa: E402  (4단계 기준선과 같은 SLERP)
 
 FPS = 30
 UNITS_PER_METER = 100.0                     # LaFAN1 BVH 는 cm
@@ -103,20 +104,6 @@ def parse_args() -> argparse.Namespace:
 # -----------------------------------------------------------------------------
 # SLERP 기준선 (회전: 쿼터니언 구면보간, 루트 위치: 선형보간)
 # -----------------------------------------------------------------------------
-def slerp(q0: torch.Tensor, q1: torch.Tensor, w: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """q0, q1 : (..., 4) 단위 쿼터니언 (w,x,y,z), w : q0 과 브로드캐스트 가능한 (..., 1) 가중치."""
-    dot = (q0 * q1).sum(-1, keepdim=True)
-    q1 = torch.where(dot < 0, -q1, q1)                         # 짧은 쪽 호
-    dot = dot.abs().clamp(max=1.0)
-    theta = torch.acos(dot)
-    s = torch.sin(theta)
-    near = s < eps                                             # 거의 같은 회전 → 선형보간
-    a = torch.where(near, 1 - w, torch.sin((1 - w) * theta) / s.clamp_min(eps))
-    b = torch.where(near, w, torch.sin(w * theta) / s.clamp_min(eps))
-    q = a * q0 + b * q1
-    return q / q.norm(dim=-1, keepdim=True)
-
-
 def slerp_pose(pb: PreparedBatch, spec: TransitionSpec, layout: FeatureLayout) -> tuple[torch.Tensor, torch.Tensor]:
     """마지막 context 프레임과 target 사이를 SLERP/선형보간 → (루트 위치 (B,L,3), 로컬 회전 (B,L,J,3,3)), 정렬된 좌표.
 

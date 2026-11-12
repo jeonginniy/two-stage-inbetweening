@@ -11,7 +11,7 @@
 | 1 | 데이터 파이프라인: BVH 읽기 → 모델 입력 표현 → 원래 형태로 복원 | ✅ 완료 (연구실 실제 LaFAN1 검증 통과) |
 | **2** | **Context Transformer 구현 + 학습** | ✅ 구현·가짜 데이터 테스트 완료 / 🔬 실제 학습은 연구실 |
 | 3 | Detail Transformer 구현 + 학습 | 예정 |
-| 4 | 평가 (공식 README 수치와 비교) + 시각화 | 🔨 진행 중 (브랜치 `viz-update`): 구간별 색 비교 영상 ✅ |
+| 4 | 평가 (공식 README 수치와 비교) + 시각화 | 🔨 브랜치 `viz-update`: 구간별 색 비교 영상 ✅, 길이별 L2P/L2Q/NPSS/발 미끄러짐 ✅ (Context only) |
 
 ### 1단계 결과 (연구실, 실제 LaFAN1)
 
@@ -28,6 +28,31 @@
   마스크 동작, 과적합, 학습 스크립트 끝까지 실행을 확인.
 - 🔬 연구실: [scripts/README.md](scripts/README.md) 의 "2단계: Context Transformer 학습" 순서대로 실행.
   2단계에서 정한 것/가정은 [docs/assumptions.md](docs/assumptions.md) E 절.
+
+### 4단계 결과 (브랜치 `viz-update`, 교수님 미팅 피드백)
+
+지표 구현 확인: SLERP·zero-velocity 기준선이 공식 README 와 소수점 4자리 일치 (L2P, NPSS; L2Q 는 README 2자리 반올림 일치).
+Context Transformer 만 평가 (Detail Transformer 미구현). `best.pth` (iteration 338000), 공식 벤치마크 2232 클립:
+
+| trans | 학습 범위 | L2P (+후처리) / README | L2Q / README | NPSS / README |
+|---|---|---|---|---|
+| 5 | 안 | 0.1289 / 0.1288 | 0.1143 / 0.1143 | 0.0015 / 0.0015 |
+| 15 | 안 | 0.4650 / 0.4623 | 0.3210 / 0.3154 | 0.0215 / 0.0211 |
+| 30 | 안 | 1.0368 / 1.0354 | 0.6059 / 0.5898 | 0.1272 / 0.1210 |
+| 45 | 밖 | 1.8874 / 1.9439 | 0.9145 / 0.9114 | 0.3458 / 0.3349 |
+
+긴 길이 (long 평가셋 2151 클립, 모든 길이에서 같은 시작 프레임) L2P: 모델 (+후처리) vs SLERP
+
+| trans (초) | 30 (1) | 60 (2) | 90 (3) | 150 (5) | 300 (10) |
+|---|---|---|---|---|---|
+| 모델 | 1.04 | 3.16 | 6.31 | 12.48 | 21.80 |
+| SLERP | 2.34 | 4.79 | 7.46 | 12.26 | 20.23 |
+
+- 학습 범위 (≤ 30) 를 넘으면 오차가 빠르게 커지고, **150 프레임 (5초) 부터는 단순 SLERP 보다 나빠진다** (L2Q 는 90 부터).
+- 긴 구간에서 모델은 target 까지 이동하지 못하고 (trans 300 루트 속도 GT 의 56%), 공식 후처리 근사 (식 23) 가
+  그 차이를 transition 양 끝의 점프로 나눈다 (trans 90 샘플: 시작·끝 각 ~1 m). 학습 범위 안에서는 경계 점프 ±1.5 cm.
+- 결과 파일: `outputs/eval/ctx_base/metrics_by_length.{csv,png}`, 영상 `outputs/videos/trans_<길이>/`.
+  해석 주의 (NPSS 길이 의존성, 발 미끄러짐 vs 이동량) 와 가정은 `docs/assumptions.md` F 절.
 
 ## 폴더 구조
 
@@ -67,7 +92,9 @@ two_stage_inbetweening/
 │       ├── context.py             배치 하나 학습/추론
 │       └── utils.py               Noam 학습률, 체크포인트, AMP
 │   ├── evaluation/              4단계
-│   │   └── inference.py           학습된 run 불러오기, 평가셋 (official / long), 임의 길이 생성
+│   │   ├── inference.py           학습된 run 불러오기, 평가셋 (official / long), 임의 길이 생성
+│   │   ├── metrics.py             L2P, L2Q, NPSS, 발 미끄러짐                 (논문 4.1)
+│   │   └── baselines.py           SLERP 보간, zero-velocity 기준선
 │   └── visualization/           4단계
 │       └── skeleton_video.py      구간별 색 GT | PRED 비교 영상
 ├── scripts/                   실행 스크립트 (데모, 연구실 검증, 통계 계산, train_context.py)
@@ -127,7 +154,8 @@ python scripts/check_bvh_roundtrip.py
 python scripts/compute_stats.py
 python scripts/compare_stats_with_official.py --official <공식repo>/tests/train_stats_context.pkl
 python scripts/train_context.py --run-name ctx_base          # 2단계 학습 (자세히: scripts/README.md)
-python scripts/render_samples.py --index 1814 --trans 30     # 4단계 구간별 색 비교 영상 → outputs/videos/
+python scripts/render_samples.py --trans 30                  # 4단계 구간별 색 비교 영상 (seed 고정 5개) → outputs/videos/trans_30/
+python scripts/eval_lengths.py                               # 4단계 길이별 지표 → outputs/eval/ctx_base/ (자세히: scripts/README.md)
 ```
 
 ## 코드에서 쓰는 방법 (1단계 파이프라인)

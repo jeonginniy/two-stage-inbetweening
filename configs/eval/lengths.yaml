@@ -39,3 +39,37 @@ batch_size: 64
 
 # 결과 저장 위치 (프로젝트 루트 기준, git 제외). {run} = 체크포인트 폴더 이름 (예: ctx_base)
 out_dir: outputs/eval/{run}
+
+# -----------------------------------------------------------------------------
+# 평가 지표 (docs/assumptions.md F1~F4)
+# -----------------------------------------------------------------------------
+# L2P 정규화 통계 μ, σ: 전역 관절 위치 (J×3) 의 차원별 평균/표준편차.
+# [공식코드] Subject 1–4, window 50, offset 20 클립을 "평균 중심 정렬" (루트 XZ 평균 = 0, 마지막 context 프레임에서
+# +X 를 보게) 한 뒤 계산. 결과는 data/cache/stats/ 에 캐시.
+bench_stats:
+  actors: [subject1, subject2, subject3, subject4]
+  window: 50
+  offset: 20
+  start_frame: 0
+
+# 비교할 방법 (eval_lengths.py --methods 로 덮어쓰기)
+#   model        : Context Transformer + 후처리 (식 23)       ← 공식 README "w/ post-processing"
+#   model_nopost : Context Transformer, 후처리 없음            ← 공식 README "WITHOUT post-processing"
+#   interp       : 루트 선형보간 + 로컬 회전 SLERP 기준선        ← 공식 README inter_*
+#   zerov        : zero-velocity (마지막 context 포즈 유지) 기준선 ← 공식 README zerov_*
+methods: [model, model_nopost, interp, zerov]
+
+# 발 미끄러짐 (선택, 논문에 없는 지표) [결정] F4
+#   발가락 높이 h < H 인 프레임의 수평 속도 × (2 − 2^(h/H)) 를 transition 프레임·관절 평균 (cm/frame).
+#   발목(Foot) 관절은 서 있을 때도 높이 7~8 cm 라서 쓰지 않는다 (발가락은 1~3 cm, Subject 5 실측).
+foot_skating:
+  joints: [LeftToe, RightToe]
+  height_threshold_cm: 3.0
+
+# [공식README] 공식 저장소 README 의 LaFAN1 벤치마크 수치 (비교용, 공식 벤치마크 2232 클립). L2P / L2Q / NPSS
+readme_reference:
+  model:          {5: [0.1288, 0.1143, 0.0015], 15: [0.4623, 0.3154, 0.0211], 30: [1.0354, 0.5898, 0.1210], 45: [1.9439, 0.9114, 0.3349]}
+  model_nopost:   {5: [0.1717, 0.1325, 0.0015], 15: [0.4923, 0.3287, 0.0212], 30: [1.0663, 0.5991, 0.1238], 45: [1.9972, 0.9170, 0.3369]}
+  interp:         {5: [0.3729, 0.22, 0.0023],   15: [1.2489, 0.62, 0.0391],   30: [2.3159, 0.98, 0.2013],   45: [3.4471, 1.25, 0.4493]}
+  zerov:          {5: [1.5231, 0.56, 0.0053],   15: [3.6946, 1.10, 0.0522],   30: [6.6005, 1.51, 0.2318],   45: [9.3293, 1.81, 0.4918]}
+  detail_full:    {5: [0.1049, 0.0994, 0.0011], 15: [0.3943, 0.2839, 0.0188], 30: [0.8948, 0.5446, 0.1124], 45: [1.6777, 0.8727, 0.3217]}

@@ -14,6 +14,7 @@
 | `render_compare.py` | 연구실 🔬 | 학습된 모델로 val 클립 transition 생성 → 원본(파랑)/생성(빨강)/SLERP(회색, `--slerp`) 겹친 30fps mp4. 클립별 gpos_l2 와 context 일치 여부 출력 |
 | `export_bvh.py` | 연구실 🔬 | 같은 클립을 원본/생성/SLERP BVH 로 저장 (LaFAN1 계층·offset, 월드 좌표 cm). 재읽기 FK 검증 출력 |
 | `render_samples.py` | 연구실 🔬 | **4단계** 샘플별 mp4: GT \| PRED, 구간 색 (BEFORE 회색 / CONTEXT 파랑 / GENERATED 주황 / TARGET 빨강), 프레임 번호·구간 이름·범례, 생성 구간 동안 target 포즈 반투명. → `outputs/videos/trans_<길이>/<시퀀스>_<시작프레임>.mp4` |
+| `eval_lengths.py` | 연구실 🔬 | **4단계** transition 길이별 L2P / L2Q / NPSS / 발 미끄러짐 (모델 ± 후처리, SLERP, zero-velocity), 공식 README 수치와 비교 → `outputs/eval/<run>/metrics_by_length.csv`, `.png`. `--render` 로 길이별 샘플 영상 |
 | `blender_render.py` | 연구실 (Blender) | `blender --background --python ... -- <클립폴더>` 로 세 BVH 를 EEVEE mp4 렌더 |
 
 🔬 = 실제 LaFAN1 이 필요. 노트북에서 실행하면 "경로가 null" 메시지를 내고 종료한다 (정상).
@@ -173,6 +174,29 @@ python scripts/render_samples.py --index 1814              # 클립 직접 지�
 - `postprocess` (식 23 후처리, 기본 켬): 학습 범위 밖에서는 모델이 target 에 못 미친 거리의 절반이 시작·끝 점프로
   나타난다 (assumptions F6). `--postprocess off` 로 모델 원래 출력을 볼 수 있다.
 - 검증 출력: `context·target 프레임 PRED vs GT`, `BEFORE 붙인 정답 vs 모델 창 정답` 이 ≈1e-5 cm 이하가 아니면 버그.
+
+## 4단계: 생성 구간 길이별 평가 (피드백 [3])
+
+```bash
+python scripts/eval_lengths.py --sets official --methods interp zerov   # 1. 기준선만: 지표 구현이 README 와 맞는지 먼저
+python scripts/eval_lengths.py                                         # 2. 전체 (평가셋 2개 × 길이 8개 × 방법 4개)
+python scripts/eval_lengths.py --render                                # + 길이별 같은 샘플 영상 (outputs/videos/trans_*/)
+python scripts/eval_lengths.py --lengths 30 600 --sets long            # 설정보다 긴 길이 (long window 자동 확장)
+```
+
+- 길이 목록, 평가셋, 방법, 발 미끄러짐 H, README 비교 수치는 모두 `configs/eval/lengths.yaml`.
+- 평가셋
+  - `official`: 공식 벤치마크 (Subject 5, window 65, offset 40, 2232 클립). window 에 들어가는 trans ≤ 53 만 (5/15/30/45).
+  - `long`: Subject 5, window 312 (= 10 + 300 + 2), offset 40, 2151 클립. **모든 길이에서 같은 시작 프레임** → 길이별 비교.
+- 방법: `model` (+후처리 식 23), `model_nopost`, `interp` (SLERP), `zerov`. Detail Transformer 는 미구현이라 Context only.
+- 결과 (`outputs/eval/<run>/`)
+  - `metrics_by_length.csv`: set, n_clips, trans, seconds, `train_range` (학습 범위 안/밖, 학습 범위 [5, 30]),
+    method, L2P, L2Q, NPSS, foot_skate (cm/frame), foot_skate_gt, readme_L2P/L2Q/NPSS (official 만), batch_size
+  - `metrics_by_length.png`: long 평가셋 길이 vs 지표 (x 로그, 학습 범위 음영, README 수치 ×)
+  - `run_info.json`: 체크포인트, 설정, 시각
+- L2P 통계 (Subject 1–4, 평균 중심 정렬) 는 처음 한 번 계산해서 `data/cache/stats/bench_stats_rmi_*.npz` 에 캐시.
+- GPU 메모리가 부족하면 그 길이를 batch 절반으로 다시 계산하고 `← 줄임` 표시, CSV `batch_size` 에 실제 값.
+- 지표 정의와 가정: `docs/assumptions.md` F1–F4, F8, F9.
 
 ### 데이터 없이 동작만 확인 (노트북/이 환경)
 
