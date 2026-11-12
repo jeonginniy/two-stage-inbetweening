@@ -80,6 +80,22 @@ Context Transformer 만 평가 (Detail Transformer 미구현). `best.pth` (itera
 - 결과: `outputs/eval/det_base/`, `outputs/eval/det_base_long/`, 영상 `outputs/videos/trans_{30,90}_detail/`
   (`trans_{30,90}/` 의 Context 만 영상과 같은 클립).
 
+**이어서 학습 (det_cont, 500k → 1M iteration, `det_cont/best.pth` = iteration 978000)** — docs/assumptions.md G17, G18:
+
+| trans | Context 만 | det_base | det_cont | README 두 단계 | 발 미끄러짐 det_base → det_cont |
+|---|---|---|---|---|---|
+| 5 | 0.1289 | 0.1177 | 0.1136 | 0.1049 | 0.143 → 0.140 |
+| 15 | 0.4650 | 0.4425 | 0.4302 | 0.3943 | 0.186 → 0.179 |
+| 30 | 1.0368 | 1.0117 | 0.9909 | 0.8948 | 0.301 → 0.281 |
+| 45 (밖) | 1.8874 | 1.8686 | 1.8429 | 1.6777 | 0.620 → 0.555 |
+
+- 모든 공식 길이에서 det_base 보다 좋아졌지만 폭은 작다 (trans 30 Context 대비 −2.4% → −4.4%, README −13.6%).
+  val30 손실도 0.1171 → 0.1147 (2%) 만 줄었다. **학습 길이만으로는 README 와의 차이를 설명하기 어렵다.**
+- long 평가셋 L2P (det_cont): 60 → 3.130 (Context 만 3.163), 90 → 6.46 (6.31), 150 → 13.11 (12.48), 300 → 23.34 (21.80).
+  60 까지는 조금 나아졌고, 90 이상은 여전히 Context 만보다 나쁘다 (300 은 det_base 22.83 보다도 나쁨).
+- 결과: `outputs/eval/det_cont_official/`, `outputs/eval/det_cont_long/`. det_base 결과·영상 사본은
+  `outputs/archive/2026-11-13_ctx_base_det_base/`.
+
 ## 폴더 구조
 
 ```
