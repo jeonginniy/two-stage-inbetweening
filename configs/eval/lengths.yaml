@@ -13,6 +13,9 @@
 
 # 평가할 체크포인트 (학습 결과 폴더의 config.yaml 을 함께 읽는다)
 ckpt: experiments/ctx_base/best.pth
+# [결정] 3단계 Detail Transformer (방법 detail / detail_post). 학습 때 고정한 Context 가 위 ckpt 와 같아야 한다.
+# 파일이 없으면 detail 방법은 건너뛴다 (--methods 로 직접 요청하면 에러).
+detail_ckpt: experiments/det_base/best.pth
 
 # 평가할 transition 길이 (프레임, 30fps). 30 = 1초, 300 = 10초
 lengths: [5, 15, 30, 45, 60, 90, 150, 300]   # [논문 4.1 / 공식README] 5,15,30,45 + [결정] 60~300
@@ -57,7 +60,9 @@ bench_stats:
 #   model_nopost : Context Transformer, 후처리 없음            ← 공식 README "WITHOUT post-processing"
 #   interp       : 루트 선형보간 + 로컬 회전 SLERP 기준선        ← 공식 README inter_*
 #   zerov        : zero-velocity (마지막 context 포즈 유지) 기준선 ← 공식 README zerov_*
-methods: [model, model_nopost, interp, zerov]
+#   detail       : 두 단계 (Context + 후처리 → Detail), Detail 출력 후처리 없음 ← 공식 README Detail (full)
+#   detail_post  : 두 단계 + Detail 출력에도 후처리 (식 23)       (README 수치 없음)
+methods: [model, model_nopost, detail, detail_post, interp, zerov]
 
 # 발 미끄러짐 (선택, 논문에 없는 지표) [결정] F4
 #   발가락 높이 h < H 인 프레임의 수평 속도 × (2 − 2^(h/H)) 를 transition 프레임·관절 평균 (cm/frame).
@@ -72,4 +77,4 @@ readme_reference:
   model_nopost:   {5: [0.1717, 0.1325, 0.0015], 15: [0.4923, 0.3287, 0.0212], 30: [1.0663, 0.5991, 0.1238], 45: [1.9972, 0.9170, 0.3369]}
   interp:         {5: [0.3729, 0.22, 0.0023],   15: [1.2489, 0.62, 0.0391],   30: [2.3159, 0.98, 0.2013],   45: [3.4471, 1.25, 0.4493]}
   zerov:          {5: [1.5231, 0.56, 0.0053],   15: [3.6946, 1.10, 0.0522],   30: [6.6005, 1.51, 0.2318],   45: [9.3293, 1.81, 0.4918]}
-  detail_full:    {5: [0.1049, 0.0994, 0.0011], 15: [0.3943, 0.2839, 0.0188], 30: [0.8948, 0.5446, 0.1124], 45: [1.6777, 0.8727, 0.3217]}
+  detail:         {5: [0.1049, 0.0994, 0.0011], 15: [0.3943, 0.2839, 0.0188], 30: [0.8948, 0.5446, 0.1124], 45: [1.6777, 0.8727, 0.3217]}

@@ -14,6 +14,8 @@
        --trans 를 바꿔도 같은 seed 면 "같은 시퀀스·같은 시작 프레임" 이 뽑힌다 → 길이별로 같은 샘플 비교
      - --index 로 직접 지정할 수도 있다
 3. 생성: src.evaluation.inference.generate (= 학습 중 검증과 같은 순서, 후처리 식 23 포함)
+     --stage detail 이면 두 단계 (Context + 후처리 → Detail, Detail 출력 후처리 없음) → outputs/videos/trans_<길이>_detail/
+     같은 seed 면 Context 만 영상 (trans_<길이>/) 과 같은 클립이라 나란히 비교할 수 있다
 4. 클립마다 mp4 하나: outputs/videos/trans_<길이>/<시퀀스>_<시작프레임>.mp4
      영상 = [BEFORE 원본 30] [CONTEXT 10] [GENERATED trans] [TARGET 1 + 유지 29], 모두 1배속 30fps
      GT 와 PRED 모두 구간 색 (회색/파랑/주황/빨강), GENERATED 동안 target 포즈 반투명 겹치기
@@ -28,6 +30,7 @@
     python scripts/render_samples.py --trans 150                 # 같은 5개 샘플, 생성 구간 5초
     python scripts/render_samples.py --n 10 --seed 1             # 설정 덮어쓰기
     python scripts/render_samples.py --index 1814                # 클립 직접 지정
+    python scripts/render_samples.py --trans 30 --stage detail   # 두 단계 (Context → Detail) 같은 5개 샘플
 """
 
 from __future__ import annotations
@@ -52,11 +55,12 @@ from src.evaluation.inference import (  # noqa: E402
     build_eval_dataset,
     collate,
     generate,
+    load_detail,
     load_run,
     max_trans_for_window,
     train_range_label,
 )
-from src.training.context import gpos_l2  # noqa: E402
+from src.training.context import global_positions, gpos_l2  # noqa: E402
 from src.visualization.skeleton_video import (  # noqa: E402
     VideoStyle,
     render_comparison_video,
@@ -75,6 +79,9 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--n", type=int, default=None, help="샘플 수 (기본: video.yaml 의 n_samples)")
     ap.add_argument("--seed", type=int, default=None, help="샘플 고르기 seed (기본: video.yaml 의 seed)")
     ap.add_argument("--ckpt", type=Path, default=None, help="기본: configs/eval/lengths.yaml 의 ckpt")
+    ap.add_argument("--stage", choices=["context", "detail"], default="context",
+                    help="context = Context 만, detail = 두 단계 (Context → Detail, 3단계)")
+    ap.add_argument("--detail-ckpt", type=Path, default=None, help="기본: configs/eval/lengths.yaml 의 detail_ckpt")
     ap.add_argument("--video-config", default="video", help="configs/viz/<이름>.yaml 또는 .yaml 경로")
     ap.add_argument("--eval-config", default="lengths", help="configs/eval/<이름>.yaml 또는 .yaml 경로")
     ap.add_argument("--postprocess", choices=["on", "off"], default=None,
@@ -122,8 +129,11 @@ def boundary_jumps(gpos: torch.Tensor, gpos_gt: torch.Tensor, ctx: int, target: 
 
 
 def render_clips(run, ds, idx: list[int], trans: int, vcfg: dict, style: VideoStyle,
-                 use_postprocess: bool = True) -> list[dict]:
+                 use_postprocess: bool = True, det=None) -> list[dict]:
     """클립 번호 목록 → 영상 저장 + 검증 값 출력. 출력: 클립별 요약 dict 목록.
+
+    det : load_detail 결과. 주면 두 단계 결과 (Context 후처리는 Detail 학습 설정, Detail 출력 후처리 없음) 를
+          그리고 use_postprocess 는 쓰지 않는다. 같은 클립의 Context 만 결과 오차도 함께 출력한다.
 
     좌표는 모두 학습용 정렬 좌표 (모델 창 마지막 context 프레임 기준 루트 XZ=0, +X 방향, cm).
     """
@@ -132,7 +142,10 @@ def render_clips(run, ds, idx: list[int], trans: int, vcfg: dict, style: VideoSt
     L = ctx + trans + 2                                         # 모델 창 (target 다음 프레임 포함)
 
     # 1) 생성 (모델 창)  gen.gpos, gen.pb.gpos_gt : (B, L, J, 3)
-    gen = generate(run, collate(ds, idx), trans, use_postprocess=use_postprocess)
+    gen = generate(run, collate(ds, idx), trans, use_postprocess=use_postprocess, detail=det)
+    ctx_gpos = None
+    if det is not None:                                         # 비교용: Detail 입력이 된 Context 단계 결과
+        ctx_gpos = global_positions(run.norm.denormalize(gen.y_ctx), gen.pb.offsets, run.skel, run.layout)
     jump_s, jump_e = boundary_jumps(gen.gpos, gen.pb.gpos_gt, ctx, gen.spec.target_idx)
     # 2) BEFORE 를 붙인 정답 (같은 정렬)  ext.gpos_gt : (B, before + L, J, 3)
     ext = aligned_gt_with_before(run, ds, idx, before, L)
@@ -148,7 +161,12 @@ def render_clips(run, ds, idx: list[int], trans: int, vcfg: dict, style: VideoSt
     head = run.skel.names.index("Head") if "Head" in run.skel.names else run.skel.num_joints - 1
     rng_label = train_range_label(trans, run.train_range)
     tgt = before + gen.spec.target_idx                         # 늘린 시퀀스에서 target 프레임 번호
-    out_tmpl = vcfg["out_path"] if use_postprocess else vcfg["out_path_postprocess_off"]
+    if det is not None:
+        out_tmpl = vcfg["out_path_detail"]
+        stage_txt = f"two-stage {det.name}/{det.ckpt_path.name} it {det.ckpt['iteration']}"
+    else:
+        out_tmpl = vcfg["out_path"] if use_postprocess else vcfg["out_path_postprocess_off"]
+        stage_txt = f"context only, post-proc {'on' if use_postprocess else 'off'}"
 
     results = []
     for b, i in enumerate(idx):
@@ -172,8 +190,7 @@ def render_clips(run, ds, idx: list[int], trans: int, vcfg: dict, style: VideoSt
             info.append(f"frame {f:3d}/{len(fidx) - 1}  BVH #{bvh_f:<5d} {extra:>12s}")
         title = (f"{name}  start {frame0}  |  trans {trans} ({trans / fps:.1f}s, {RANGE_EN[rng_label]} "
                  f"{run.train_range[0]}-{run.train_range[1]})  |  transition mean err {l2:.2f} cm  |  "
-                 f"post-proc {'on' if use_postprocess else 'off'}  |  "
-                 f"{run.name}/{run.ckpt_path.name} it {run.ckpt['iteration']}")
+                 f"{stage_txt}  |  {run.name}/{run.ckpt_path.name} it {run.ckpt['iteration']}")
         path = resolve_path(out_tmpl.format(trans=trans, seq=name, start=frame0))
 
         print(f"\n[{b + 1}/{len(idx)}] {name} 모델 창 BVH 프레임 {frame0}–{frame0 + gen.spec.target_idx} "
@@ -181,6 +198,10 @@ def render_clips(run, ds, idx: list[int], trans: int, vcfg: dict, style: VideoSt
         print(f"  transition 평균 위치 오차 (gpos_l2): {l2:.4f} cm   "
               f"경계 점프 (정답 대비 추가 이동): context→생성 {float(jump_s[b]):+.1f} cm, "
               f"생성→target {float(jump_e[b]):+.1f} cm")
+        ctx_l2 = None
+        if ctx_gpos is not None:
+            ctx_l2 = float(gpos_l2(ctx_gpos[one], gen.pb.gpos_gt[one], s))
+            print(f"  (비교) 같은 클립 Context 단계 결과 오차: {ctx_l2:.4f} cm → Detail 후 {l2:.4f} cm")
         print(f"  context·target 프레임 PRED vs GT 최대 오차: {known_err:.2e} cm → "
               f"{'OK' if known_err < 1e-3 else '경고: 입력 프레임이 정답과 다름!'}")
         print(f"  BEFORE 붙인 정답 vs 모델 창 정답 (정렬 일치) 최대 오차: {float(align_err[b]):.2e} cm → "
@@ -191,7 +212,10 @@ def render_clips(run, ds, idx: list[int], trans: int, vcfg: dict, style: VideoSt
         print(f"  저장: {path}  ({len(fidx)} 프레임 = {len(fidx) / fps:.1f}초, 배치 {layout}, "
               f"{time.time() - tic:.0f}초)")
         results.append({"seq": name, "start": frame0, "index": i, "trans": trans,
-                        "train_range": rng_label, "postprocess": use_postprocess, "gpos_l2": round(l2, 4),
+                        "train_range": rng_label, "stage": "detail" if det is not None else "context",
+                        "postprocess": use_postprocess if det is None else "ctx" if det.ctx_postprocess else "off",
+                        "gpos_l2": round(l2, 4),
+                        "ctx_gpos_l2": round(ctx_l2, 4) if ctx_l2 is not None else "",
                         "jump_start_cm": round(float(jump_s[b]), 2), "jump_end_cm": round(float(jump_e[b]), 2),
                         "layout": layout, "path": str(path)})
     return results
@@ -220,8 +244,13 @@ def main() -> None:
         idx = select_samples(ds, n, seed, int(vcfg["before_frames"]))
         print(f"seed {seed} 로 {len(idx)}개 선택 (길이와 무관하게 같은 클립): {idx}")
     pp = bool(vcfg["postprocess"]) if args.postprocess is None else args.postprocess == "on"
+    det = None
+    if args.stage == "detail":
+        det = load_detail(args.detail_ckpt or ecfg["detail_ckpt"], run)
+        print(f"두 단계: Detail {det.ckpt_path} (iteration {det.ckpt['iteration']}). "
+              f"--postprocess 는 쓰지 않음 (Context 후처리 {'켬' if det.ctx_postprocess else '끔'}, Detail 출력 후처리 없음)")
     with torch.no_grad():
-        results = render_clips(run, ds, idx, args.trans, vcfg, style, use_postprocess=pp)
+        results = render_clips(run, ds, idx, args.trans, vcfg, style, use_postprocess=pp, det=det)
     manifest = Path(results[0]["path"]).parent / "samples.csv"
     write_manifest(results, manifest)
     print(f"\n{len(results)}개 평균 transition 오차 (trans {args.trans}): "

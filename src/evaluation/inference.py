@@ -1,6 +1,6 @@
 """
-평가/시각화 공용: 학습된 Context Transformer 불러오기 → 평가셋 → 임의 길이 transition 생성 (4단계)
-=========================================================================================
+평가/시각화 공용: 학습된 Context (+ Detail) Transformer 불러오기 → 평가셋 → 임의 길이 transition 생성 (4단계)
+=====================================================================================================
 
 이 파일이 하는 일
 -----------------
@@ -13,6 +13,10 @@ scripts/render_samples.py (영상) 와 scripts/eval_lengths.py (길이별 지표
     ds, info = build_eval_dataset(run, eval_cfg, "long")     # 2) 평가셋 (official = 공식 벤치마크, long = 긴 길이용)
     batch = collate(ds, [0, 1, 2])                           # 3) 클립 몇 개를 배치로
     gen = generate(run, batch, trans=60)                     # 4) 자르기 → 정렬 → 정규화 → 모델 → (후처리) → FK
+
+    두 단계 (3단계 Detail Transformer 까지):
+    det = load_detail("experiments/det_base/best.pth", run)  # Detail 학습 때 고정한 Context 가 run 과 같은지 확인
+    gen = generate(run, batch, trans=60, detail=det)         # Context (+후처리) → Detail (기본 후처리 없음, G4)
 
 generate 는 학습 중 검증 (scripts/train_context.py 의 validate → src.training.context.eval_transition) 과
 같은 순서를 따르고, 후처리 (논문 식 23) 를 켜고 끌 수 있게 한 것만 다르다.
@@ -42,7 +46,9 @@ from src.data.representation import FeatureLayout, ZScoreNormalizer
 from src.data.skeleton import Skeleton
 from src.models.context_transformer import build_context_transformer
 from src.training.context import PreparedBatch, global_positions, infer_context, prepare_batch
+from src.models.detail_transformer import build_detail_transformer
 from src.training.context_inputs import TransitionSpec
+from src.training.detail import infer_two_stage
 from src.training.utils import load_checkpoint
 
 FRAME_KEYS = ("root_pos", "local_rot", "contacts")   # 시간 축이 있는 배치 key (자를 때 사용)
@@ -121,6 +127,54 @@ def load_run(ckpt: str | Path, config: str | Path | None = None, env_name: str |
     return LoadedRun(cfg, data_cfg, env, dev, skel, layout, norm, model, ck, ckpt_path)
 
 
+@dataclass
+class DetailRun:
+    """학습된 Detail Transformer 하나 (3단계).
+
+    cfg             : <det run 폴더>/config.yaml (scripts/train_detail.py 가 저장)
+    model           : DetailTransformer (eval 모드)
+    ctx_postprocess : Detail 입력을 만들 때 Context 출력에 식 (23) 후처리를 했는지 (학습 설정 그대로, G4)
+    """
+
+    cfg: dict
+    model: torch.nn.Module
+    ckpt: dict
+    ckpt_path: Path
+    ctx_postprocess: bool
+
+    @property
+    def name(self) -> str:
+        """run 이름 = 체크포인트 폴더 이름 (예: det_base)."""
+        return self.ckpt_path.parent.name
+
+
+def load_detail(ckpt: str | Path, run: LoadedRun) -> DetailRun:
+    """Detail 체크포인트 + 그 폴더의 config.yaml → DetailRun.
+
+    Detail 은 특정 Context 출력 위에서 학습되므로, 학습 때 고정한 Context 체크포인트 (config.yaml 의
+    context_run.ckpt) 와 정규화 통계가 run 과 같아야 한다. 다르면 ValueError (조용히 다른 조합으로 평가하지 않음).
+    입력:  ckpt (예: experiments/det_base/best.pth), run (load_run 결과 = 고정했던 Context)
+    """
+    ckpt_path = resolve_path(ckpt)
+    cfg_path = ckpt_path.parent / "config.yaml"
+    if not ckpt_path.exists() or not cfg_path.exists():
+        raise FileNotFoundError(f"Detail 체크포인트 {ckpt_path} 또는 {cfg_path} 가 없습니다 (scripts/train_detail.py).")
+    cfg = load_yaml(cfg_path)
+    if cfg.get("fake_data"):
+        raise ValueError(f"{cfg_path} 는 --fake-data 로 학습한 결과입니다 (평가 의미 없음).")
+    ctx_ckpt = resolve_path(cfg["context_run"]["ckpt"])
+    if ctx_ckpt.resolve() != run.ckpt_path.resolve():
+        raise ValueError(f"Detail 은 Context {ctx_ckpt} 위에서 학습됐는데 평가 Context 는 {run.ckpt_path} 입니다. "
+                         f"--ckpt 를 {ctx_ckpt} 로 맞추세요.")
+    if resolve_path(cfg["stats"]).resolve() != resolve_path(run.cfg["stats"]).resolve():
+        raise ValueError("Detail 과 Context 의 정규화 통계 파일이 다릅니다 (G8).")
+    ck = load_checkpoint(ckpt_path, map_location=run.device)
+    model = build_detail_transformer(cfg["model"], run.layout, len(run.skel.contact_joints)).to(run.device)
+    model.load_state_dict(ck["model"])
+    model.eval()
+    return DetailRun(cfg, model, ck, ckpt_path, bool(cfg["context"].get("postprocess", True)))
+
+
 # -----------------------------------------------------------------------------
 # 2) 평가셋
 # -----------------------------------------------------------------------------
@@ -177,14 +231,18 @@ class Generation:
 
     pb   : 정답 (PreparedBatch: x_gt (B,L,D) 정규화, x_gt_raw, gpos_gt (B,L,J,3), offsets (B,1,J,3))
     spec : TransitionSpec (context 0..ctx−1 | transition ctx..ctx+trans−1 | target ctx+trans)
-    y    : (B, L, D) 예측 (정규화된 공간). transition 밖은 정답
+    y    : (B, L, D) 예측 (정규화된 공간). transition 밖은 정답. detail 을 주면 두 단계 결과
     gpos : (B, L, J, 3) 예측 전역 관절 위치 (cm)
+    y_ctx   : (B, L, D) 두 단계일 때 Context 단계 결과 (Detail 입력), 아니면 None
+    contact : (B, L, C) 두 단계일 때 Detail 의 발 접촉 확률 ĉ (식 15), 아니면 None
     """
 
     pb: PreparedBatch
     spec: TransitionSpec
     y: Tensor
     gpos: Tensor
+    y_ctx: Tensor | None = None
+    contact: Tensor | None = None
 
 
 def cut_batch(batch: dict, start: int, length: int) -> dict:
@@ -210,7 +268,8 @@ def prepare_window(run: LoadedRun, batch: dict, trans: int) -> tuple[PreparedBat
 
 
 @torch.no_grad()
-def generate(run: LoadedRun, batch: dict, trans: int, use_postprocess: bool = True) -> Generation:
+def generate(run: LoadedRun, batch: dict, trans: int, use_postprocess: bool = True,
+             detail: "DetailRun | None" = None, det_postprocess: bool = False) -> Generation:
     """LafanDataset 배치 → transition `trans` 프레임 생성 (논문 3.3, 후처리 식 23).
 
     순서 (학습 중 검증 eval_transition 과 같음):
@@ -222,9 +281,18 @@ def generate(run: LoadedRun, batch: dict, trans: int, use_postprocess: bool = Tr
     입력:
         batch : {"root_pos" (B,W,3), "local_rot" (B,W,J,3,3), "offsets" (B,J,3), ...}, W ≥ L
         trans : transition 길이 (1 이상, 학습 범위 밖이어도 됨)
+        use_postprocess : Context 만 쓸 때 식 (23) 후처리 여부
+        detail : load_detail 결과. 주면 두 단계 (Context → Detail, 논문 3.4). 이때 Context 후처리는
+                 Detail 학습 설정 (detail.ctx_postprocess) 을 따르고 use_postprocess 는 쓰지 않는다
+        det_postprocess : Detail 출력에도 식 (23) 후처리 (기본 끔, 공식 README Detail 수치와 같음, G4)
     출력:  Generation
     """
     pb, spec = prepare_window(run, batch, trans)
+    if detail is not None:
+        y_ctx, y, prob = infer_two_stage(run.model, detail.model, pb.x_gt, spec, run.layout,
+                                         ctx_postprocess=detail.ctx_postprocess, det_postprocess=det_postprocess)
+        gpos = global_positions(run.norm.denormalize(y), pb.offsets, run.skel, run.layout)
+        return Generation(pb, spec, y, gpos, y_ctx, prob)
     y = infer_context(run.model, pb.x_gt, spec, run.layout, use_postprocess=use_postprocess)
     gpos = global_positions(run.norm.denormalize(y), pb.offsets, run.skel, run.layout)
     return Generation(pb, spec, y, gpos)

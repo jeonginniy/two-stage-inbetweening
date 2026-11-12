@@ -10,10 +10,10 @@ Current goal (professor meeting feedback, branch `viz-update`): find how far the
 
 Status (2026-11):
 - Context Transformer trained: 500k iterations, `experiments/ctx_base/` (`best.pth` = iteration 338000, `last.pth`, `log.csv`, `config.yaml`). Never overwrite anything in `experiments/`; checkpoint compatibility and training code must stay untouched.
-- Detail Transformer (stage 3): **not implemented**. Evaluate Context only.
+- Detail Transformer (stage 3) on branch `detail-transformer`: model/inputs/losses (`src/models/detail_transformer.py`, `src/training/detail.py`), `scripts/train_detail.py` (frozen context = `ctx_base/best.pth`). Full training `experiments/det_base/` started 2026-11-12 (~6 h, 41 ms/it, log in `det_base.out` — also leave uncommitted). Eval: `eval_lengths.py` methods `detail`/`detail_post`, `render_samples.py --stage detail`; `inference.load_detail` refuses a Detail trained on a different context checkpoint.
 - Stage 4 on `viz-update`: segment-colored GT|PRED videos (`scripts/render_samples.py`), L2P/L2Q/NPSS/foot-skating by transition length (`scripts/eval_lengths.py`). Metric implementation verified: interp/zero-velocity baselines match the official README to 4 decimals; Context-only matches README within ~1–5%.
 - Finding: beyond the training range (trans > 30) the model fails to reach the target; the official post-processing approximation (eq. 23) then splits the gap into jumps at both transition boundaries (assumptions F6).
-- `configs/env/lab.yaml` (local paths) and `ctx_base.out` are intentionally uncommitted — leave them out of commits. Push only after the user confirms.
+- `configs/env/lab.yaml` (local paths) `ctx_base.out` and `det_base.out` are intentionally uncommitted — leave them out of commits. Push only after the user confirms.
 
 ## Project
 

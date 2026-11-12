@@ -184,7 +184,11 @@ python scripts/render_samples.py --trans 90                # 같은 5개 샘플,
 python scripts/render_samples.py --trans 90 --postprocess off   # 후처리 끔 → outputs/videos/trans_90_nopost/
 python scripts/render_samples.py --n 10 --seed 1           # 샘플 수/seed 덮어쓰기
 python scripts/render_samples.py --index 1814              # 클립 직접 지정 (walk1_subject5, 프레임 1200)
+python scripts/render_samples.py --trans 30 --stage detail # 두 단계 (Context → Detail), 같은 샘플 → outputs/videos/trans_30_detail/
 ```
+
+`--stage detail` 은 `trans_<길이>/` (Context 만) 와 같은 클립을 그려서 나란히 비교할 수 있다. 콘솔과 `samples.csv` 에
+같은 클립의 Context 단계 오차 (`ctx_gpos_l2`) 도 함께 남는다.
 
 - 설정: `configs/viz/video.yaml` (색, BEFORE 30 / TARGET 유지 30 프레임, 배치, 출력 경로),
   `configs/eval/lengths.yaml` (체크포인트, 평가셋). 코드에 값을 쓰지 않는다.
@@ -215,7 +219,11 @@ python scripts/eval_lengths.py --lengths 30 600 --sets long            # 설정�
 - 평가셋
   - `official`: 공식 벤치마크 (Subject 5, window 65, offset 40, 2232 클립). window 에 들어가는 trans ≤ 53 만 (5/15/30/45).
   - `long`: Subject 5, window 312 (= 10 + 300 + 2), offset 40, 2151 클립. **모든 길이에서 같은 시작 프레임** → 길이별 비교.
-- 방법: `model` (+후처리 식 23), `model_nopost`, `interp` (SLERP), `zerov`. Detail Transformer 는 미구현이라 Context only.
+- 방법: `model` (+후처리 식 23), `model_nopost`, `interp` (SLERP), `zerov`,
+  `detail` (두 단계: Context + 후처리 → Detail, Detail 출력 후처리 없음 = README Detail 수치와 같은 조건), `detail_post` (Detail 출력에도 후처리).
+  `detail*` 는 `lengths.yaml` 의 `detail_ckpt` (기본 `experiments/det_base/best.pth`) 가 있을 때만 계산하고, 없으면 건너뛴다.
+  Detail 학습 때 고정한 Context 가 `ckpt` 와 다르면 시작하지 않는다. Detail 을 넣으면 결과 폴더는 `outputs/eval/<det run>/`.
+  README Detail 비교: `python scripts/eval_lengths.py --sets official --lengths 5 15 30 45 --methods model detail`
 - 결과 (`outputs/eval/<run>/`)
   - `metrics_by_length.csv`: set, n_clips, trans, seconds, `train_range` (학습 범위 안/밖, 학습 범위 [5, 30]),
     method, L2P, L2Q, NPSS, foot_skate (cm/frame), foot_skate_gt, readme_L2P/L2Q/NPSS (official 만), batch_size
