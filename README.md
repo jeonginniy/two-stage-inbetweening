@@ -10,7 +10,7 @@
 |---|---|---|
 | 1 | 데이터 파이프라인: BVH 읽기 → 모델 입력 표현 → 원래 형태로 복원 | ✅ 완료 (연구실 실제 LaFAN1 검증 통과) |
 | **2** | **Context Transformer 구현 + 학습** | ✅ 구현·가짜 데이터 테스트 완료 / 🔬 실제 학습은 연구실 |
-| 3 | Detail Transformer 구현 + 학습 | 예정 |
+| 3 | Detail Transformer 구현 + 학습 | 🔨 브랜치 `detail-transformer`: 모델·입력·손실 ✅, 학습 스크립트 ✅ (300 iteration 확인), 본 학습 예정 |
 | 4 | 평가 (공식 README 수치와 비교) + 시각화 | 🔨 브랜치 `viz-update`: 구간별 색 비교 영상 ✅, 길이별 L2P/L2Q/NPSS/발 미끄러짐 ✅ (Context only) |
 
 ### 1단계 결과 (연구실, 실제 LaFAN1)
@@ -97,7 +97,7 @@ two_stage_inbetweening/
 │   │   └── baselines.py           SLERP 보간, zero-velocity 기준선
 │   └── visualization/           4단계
 │       └── skeleton_video.py      구간별 색 GT | PRED 비교 영상
-├── scripts/                   실행 스크립트 (데모, 연구실 검증, 통계 계산, train_context.py)
+├── scripts/                   실행 스크립트 (데모, 연구실 검증, 통계 계산, train_context.py, train_detail.py)
 ├── tests/                     pytest 테스트 (+ 가짜 데이터 생성 도우미)
 └── docs/                      정리 노트
     ├── assumptions.md           가정/미확인 사항 ← 꼭 읽기
@@ -154,6 +154,7 @@ python scripts/check_bvh_roundtrip.py
 python scripts/compute_stats.py
 python scripts/compare_stats_with_official.py --official <공식repo>/tests/train_stats_context.pkl
 python scripts/train_context.py --run-name ctx_base          # 2단계 학습 (자세히: scripts/README.md)
+python scripts/train_detail.py --run-name det_base           # 3단계 학습 (고정된 Context 위에서)
 python scripts/render_samples.py --trans 30                  # 4단계 구간별 색 비교 영상 (seed 고정 5개) → outputs/videos/trans_30/
 python scripts/eval_lengths.py                               # 4단계 길이별 지표 → outputs/eval/ctx_base/ (자세히: scripts/README.md)
 ```

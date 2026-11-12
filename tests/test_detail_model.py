@@ -9,7 +9,13 @@
 - L_foot 는 ĉ 로 gradient 를 보내지 않는다 (논문 3.5.5), L_c 는 보낸다
 - 손실 손계산 (L_c, L_foot)
 - 작은 모델이 고정 배치에 과적합되는가
+- scripts/train_detail.py 가 가짜 데이터로 끝까지 도는가 (체크포인트·로그 생성)
 """
+
+import shutil
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 import torch
@@ -34,6 +40,8 @@ from src.training.detail import (
 )
 from src.training.losses import contact_loss, foot_sliding_loss
 from tests.helpers import SKELETON_YAML, write_fake_lafan_bvh
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 TINY = dict(d_mask=1, n_layer=2, n_head=2, d_model=32, d_head=8, d_ff=32,
             d_encoder_h=32, d_decoder_h=32, dropout=0.0, attn_bias=False, attn_scale="d_head")
@@ -176,3 +184,22 @@ def test_tiny_detail_overfits(fake_setup):
         opt.step()
         first = first if first is not None else float(loss.detach())
     assert float(loss.detach()) < 0.5 * first, (first, float(loss.detach()))
+
+
+def test_train_detail_script_fake_data(tmp_path):
+    """가짜 BVH + 무작위 Context 로 학습 스크립트가 끝까지 돌고 결과 파일을 만드는지 (값은 의미 없음)."""
+    run_name = f"pytest_det_{tmp_path.name}"
+    cmd = [sys.executable, str(PROJECT_ROOT / "scripts" / "train_detail.py"), "--env", "laptop",
+           "--fake-data", "--max-iters", "6", "--batch-size", "4", "--run-name", run_name,
+           "--num-workers", "0", "--set", "model.n_layer=1", "model.d_model=32", "model.d_ff=32",
+           "model.d_encoder_h=32", "model.d_decoder_h=32", "model.d_head=8", "model.n_head=2",
+           "train.log_interval=3", "train.val_interval=6", "train.ckpt_interval=6", "train.val_trans=[5,30]"]
+    res = subprocess.run(cmd, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=600)
+    run_dir = PROJECT_ROOT / "experiments" / run_name
+    try:
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "val30_loss" in res.stdout and "val30_contact_acc" in res.stdout
+        for f in ("last.pth", "best.pth", "log.csv", "config.yaml"):
+            assert (run_dir / f).exists(), f
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)

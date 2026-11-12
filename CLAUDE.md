@@ -29,7 +29,7 @@ Run everything from the project root (`pytest.ini` sets `pythonpath = .`; script
 
 ```bash
 source .venv/bin/activate
-pytest                                         # all data-free tests (lab tests auto-skip); expected 65 passed, 4 skipped
+pytest                                         # all data-free tests (lab tests auto-skip); expected 87 passed, 4 skipped
 pytest tests/test_context_model.py -k mask -v  # single test file / test
 TSI_ENV=lab pytest -m lab -v                   # tests needing real LaFAN1 (tests/test_lafan1_real.py)
 ```

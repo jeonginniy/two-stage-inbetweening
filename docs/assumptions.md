@@ -140,3 +140,5 @@ heading 해석: 처음에 "0.9 보다 크면 OK" 라고 적었지만, 실제 값
 | G10 | 고정할 Context = `experiments/ctx_base/best.pth` (iteration 338000). 학습 중 eval 모드, `requires_grad=False`, `torch.no_grad` 로 실행 | 논문 3.6.1 "freeze its parameters" | 결정 사항 |
 | G11 | transition 길이·제약 프레임은 Context 와 같은 방식으로 배치마다 무작위 (q 0.1, p 0.5), window 42, batch 32, Adam (0.9, 0.999) | 논문 3.6.1 | 논문과 같음 |
 | G12 | 학습 길이 max_iters 500,000, best 체크포인트 = val trans 30 손실 최소 (Context 와 같은 기준, E16). val L2P 대신 손실을 쓰는 것은 일관성 때문 | 논문: "최대 200 epoch + early stopping" | 결정 사항 |
+| G13 | Detail 출력은 **잔차가 아님**: transition 프레임을 Detail 출력 포즈로 그대로 덮어쓴다 (Context 출력 + Δ 가 아님). 그래서 학습 초기에는 Detail 결과가 Context 보다 훨씬 나쁘다 (300 iteration 에서 val30 위치 오차 45.6 cm vs Context 6.4 cm) | 논문 식 14 (y_det = D(·) 의 R, P). 공식 코드 `get_model_output`: `state_out[..., seq_slice, :] = model_out[..., seq_slice, rp_slice]` (읽기만 함) | 논문·공식과 같음 |
+| G14 | 정규화 통계 경로는 Context 체크포인트 폴더의 `config.yaml` 의 `stats` 를 그대로 쓴다. 데이터 설정 (context_len, forward_world_axis, 스켈레톤 파일) 이 Context 학습 때와 다르면 학습을 시작하지 않는다 | G8 과 같은 이유 | 결정 사항 |

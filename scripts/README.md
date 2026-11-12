@@ -11,6 +11,7 @@
 | `compute_stats.py` | 연구실 🔬 | z-score 통계 μ, σ 계산 → `data/cache/stats/lafan1_context_stats.npz` (논문 3.6.1) |
 | `compare_stats_with_official.py` | 연구실 🔬 | 내 통계 vs 공식 저장소의 `tests/train_stats_context.pkl` 차원별 비교 |
 | `train_context.py` | 연구실 🔬 / 노트북 (`--fake-data`) | **2단계** Context Transformer 학습 (논문 3.3, 3.5, 3.6). 체크포인트·로그를 `experiments/<run>/` 에 저장 |
+| `train_detail.py` | 연구실 🔬 / 노트북 (`--fake-data`) | **3단계** Detail Transformer 학습 (논문 3.4, 3.5, 3.6). 고정된 Context (`experiments/ctx_base/best.pth`, 읽기만) 위에서 학습. 결과는 `experiments/<run>/` |
 | `render_compare.py` | 연구실 🔬 | 학습된 모델로 val 클립 transition 생성 → 원본(파랑)/생성(빨강)/SLERP(회색, `--slerp`) 겹친 30fps mp4. 클립별 gpos_l2 와 context 일치 여부 출력 |
 | `export_bvh.py` | 연구실 🔬 | 같은 클립을 원본/생성/SLERP BVH 로 저장 (LaFAN1 계층·offset, 월드 좌표 cm). 재읽기 FK 검증 출력 |
 | `render_samples.py` | 연구실 🔬 | **4단계** 샘플별 mp4: GT \| PRED, 구간 색 (BEFORE 회색 / CONTEXT 파랑 / GENERATED 주황 / TARGET 빨강), 프레임 번호·구간 이름·범례, 생성 구간 동안 target 포즈 반투명. → `outputs/videos/trans_<길이>/<시퀀스>_<시작프레임>.mp4` |
@@ -149,6 +150,32 @@ blender --background --python scripts/blender_render.py -- <클립폴더> --stil
 
 ---
 
+## 3단계: Detail Transformer 학습 (연구실, 브랜치 `detail-transformer`)
+
+고정된 Context Transformer (설정 `configs/model/detail.yaml` 의 `context.ckpt`, 기본 `experiments/ctx_base/best.pth`) 를
+읽기만 하고 그 위에서 Detail 만 학습한다. 정규화 통계는 Context 폴더의 `config.yaml` 에 적힌 파일을 그대로 쓴다 (G8, G14).
+결과 폴더가 Context 폴더와 같거나 이미 `last.pth` 가 있으면 시작하지 않는다 (덮어쓰기 방지).
+
+```bash
+export TSI_ENV=lab
+# 1) 짧게 돌려 보기
+python scripts/train_detail.py --run-name det_smoke --max-iters 300 \
+    --set train.log_interval=50 train.val_interval=300 train.ckpt_interval=300
+# 2) 본 학습 (백그라운드)
+nohup python scripts/train_detail.py --run-name det_base > det_base.out 2>&1 &
+# 중단 후 이어서
+python scripts/train_detail.py --run-name det_base --resume last
+```
+
+출력 읽는 법:
+- train: `loss` (식 22 가중합), `rot`, `pos` (cm), `contact` (L_c), `foot` (L_foot)
+- val (trans 5/15/30): `val{t}_loss`, `val{t}_gpos_l2` (두 단계 결과, cm), `val{t}_ctx_gpos_l2` (같은 클립의 Context 만 결과,
+  비교 기준), `val{t}_contact_acc`. best = `val30_loss` 최소.
+- Detail 은 잔차가 아니라 포즈 전체를 출력하므로 (G13) 학습 초기에는 `gpos_l2` 가 `ctx_gpos_l2` 보다 훨씬 크다. 정상이다.
+
+300 iteration 실측 (RTX 3070, batch 32, fp32): **41 ms/it**, VRAM 최대 **384 MB**,
+train loss 0.637 → 0.472 (50 → 300 iteration 평균), val30 위치 오차 45.6 cm (Context 6.4 cm).
+
 ## 4단계: 결과 영상 — 구간별 색 구분 (교수님 미팅 피드백 [1][2])
 
 ```bash
@@ -205,3 +232,4 @@ python scripts/train_context.py --env laptop --fake-data --max-iters 20 --batch-
     --set model.n_layer=2 model.d_model=64 model.d_ff=64 model.d_encoder_h=64 model.d_decoder_h=64
 ```
 가짜 LaFAN1 형식 BVH 를 `experiments/<run>/fake_lafan1/` 에 만들고 통계도 그 자리에서 계산한다. **학습 결과는 의미가 없다.**
+`scripts/train_detail.py` 도 같은 옵션으로 돌린다 (고정할 Context 는 무작위 초기화한 같은 크기 모델).
