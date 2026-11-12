@@ -334,7 +334,7 @@ def main() -> None:
         w.writeheader()
         w.writerows(rows)
     png_path = out_dir / "metrics_by_length.png"
-    plot_lengths(rows, run.train_range, png_path, run.name)
+    plot_lengths(rows, run.train_range, png_path, f"{run.name} + {det.name}" if det else run.name)
     with open(out_dir / "run_info.json", "w", encoding="utf-8") as f:
         json.dump({**info, "lengths": lengths, "sets": args.sets, "methods": methods,
                    "batch_size": batch_size, "foot_skating": fs, "bench_stats": ecfg["bench_stats"],
