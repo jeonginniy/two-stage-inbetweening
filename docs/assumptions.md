@@ -120,3 +120,23 @@ heading 해석: 처음에 "0.9 보다 크면 OK" 라고 적었지만, 실제 값
 | F8 | 모델 구조상 최대 transition 길이는 없다. 상대 위치 PE (식 12–13) 와 Keyframe PE (식 11) 가 거리 값 (스칼라) 을 MLP 에 넣는 방식이라 고정 길이 표가 없다. 학습 때 본 값은 상대 거리 ≤ 41, keyframe 거리 ≤ 31 이고, 그보다 큰 값은 MLP 외삽 (PReLU → 거의 선형) 이다. 재학습 없이 불가능한 길이는 없으며, 필요한 것은 클립 길이 ≥ ctx + trans + 2 (Subject 5 의 가장 짧은 파일 4742 프레임) 와 메모리 (어텐션 O(T²); T = 312, batch 64 에서 8 GB 안) 뿐 | 코드 (`src/models/layers.py`) | 확인됨 |
 | F9 | 결과표의 "학습 범위 밖" = 학습 transition 범위 [min_trans, max_trans] = [5, 30] (학습 run 의 config.yaml) 밖. 공식 README 의 45 도 학습 범위 밖 | 피드백 [3] | 결정 사항 |
 | F10 | **길이가 다른 결과끼리 비교할 때 주의**: (a) NPSS 는 transition 프레임 수만큼의 주파수 bin 에 대한 누적분포 L1 거리라서 길이가 길수록 값 자체가 커진다 → 같은 길이 안에서 방법끼리만 비교. (b) 발 미끄러짐은 덜 움직일수록 작아진다 (zero-velocity 는 항상 0). long 평가셋 1/4 표본 실측: trans 300 에서 모델의 루트 속도 1.91 cm/frame (GT 3.40), 발가락 속도 2.79 (GT 3.74) → trans 300 에서 미끄러짐이 줄어든 것은 개선이 아니라 덜 움직인 결과. 이동량과 함께 봐야 함 | 지표 정의 (F2, F4) + 실측 | 해석 주의 |
+
+## G. 3단계 Detail Transformer (논문 3.4, 3.5, 3.6, 브랜치 `detail-transformer`)
+
+코드: `src/models/detail_transformer.py`, `src/training/detail.py`, `src/training/losses.py` (L_c, L_foot 추가),
+`scripts/train_detail.py`, 설정 `configs/model/detail.yaml`. 공식 코드는 **읽기만** 했다 (import/복사/실행 없음).
+
+| # | 내용 | 근거 | 상태 |
+|---|---|---|---|
+| G1 | 구조 = Context 와 같은 층 (상대 위치 어텐션, pre-LN FFN, 6층·8헤드·512), **Keyframe PE 없음**, 출력 = 포즈 D + 발 접촉 C (= 스켈레톤 contact_joints 수, LaFAN1 4 → 139). 기존 `ContextTransformer` 와 체크포인트는 그대로 두고 새 클래스로 작성 | 논문 3.4, 3.6, 공식 config `d_out 139` | 논문과 같음 |
+| G2 | 어텐션 마스크 (그림 5b): 모든 query 가 프레임 0..target 을 key 로 봄. **target 이후 프레임은 가림** | 논문 그림 5b 는 "자유롭게 본다" 고만 함. 공식 코드 `atten_mask[:, :target_idx + 1] = False` | 가정 (공식과 같음) |
+| G3 | 입력 x_det = 정답 클립에서 transition 만 Context 출력, 제약 (midway) 프레임은 정답으로 되돌림 (전 관절 제약, d_mask 1). m_in 은 Context 와 같음. target 이후 프레임은 정답 (마스크로 가려짐) | 논문 3.4 | 논문과 같음 |
+| G4 | Detail 입력을 만들 때 Context 출력은 **후처리 (식 23) 한 값**. Detail 출력에는 기본으로 후처리를 하지 않음 (`infer_two_stage(det_postprocess=False)`) | 논문 3.6.2 "post-processing is only applied during inference of the Context Transformer". 공식 코드: 학습·평가 모두 Context 후처리 켬, `eval_detail_model.py` 는 기본 후처리 없음 (README Detail 수치도 후처리 없음) | 가정 (공식과 같음) |
+| G5 | 손실 (식 22): L_rot (6D, 역정규화) + 0.02·L_pos (FK, cm) + 0.05·L_c + 0.05·L_foot, 모두 L1·원소 평균·transition 프레임만. **스무딩 손실 없음** | 논문 3.5, 3.6.1. 공식 config 에 `sw 0.005` 가 있지만 Detail 손실 코드에는 쓰이지 않음 | 논문과 같음 |
+| G6 | L_c = ĉ (sigmoid 확률) 과 정답 접촉 라벨 (B8, 0/1) 의 L1. L_foot = ĉ.detach() × 발 관절 4개 (LeftFoot, LeftToe, RightFoot, RightToe) 의 전역 속도 v_t = g_t − g_{t−1} (첫 transition 프레임은 마지막 context 프레임과의 차이) 의 L1 | 논문 식 19, 20 ("sever the gradient back-propagation on ĉ"), 공식 코드 `cal_c_loss`, `cal_f_loss` | 가정 (공식과 같음) |
+| G7 | 접촉 출력: transition 프레임은 ĉ, 나머지 프레임은 정답 라벨 (손실은 transition 만이라 영향 없음) | 공식 코드 | 가정 |
+| G8 | Detail 정규화 통계 = Context 통계 (`lafan1_context_stats.npz`) 재사용 | 공식 코드의 Detail 통계 (`train_stats_detail.pkl`) 는 Context 통계와 **같은 분할 (window 50, offset 20)·같은 정렬·같은 135차원 표현** 으로 계산 → 값이 같다. 우리 Context 통계는 공식 Context 통계와 1e-12 수준으로 일치 (0 절) | 가정 (근거 있음) |
+| G9 | 학습률 base_lr **0.025** (Noam, warmup 8000 → 최대 ≈ 2.8e-4). Context (0.0625) 와 다름 | 논문에 없음. 공식 detail config `lr 0.025` | 가정 |
+| G10 | 고정할 Context = `experiments/ctx_base/best.pth` (iteration 338000). 학습 중 eval 모드, `requires_grad=False`, `torch.no_grad` 로 실행 | 논문 3.6.1 "freeze its parameters" | 결정 사항 |
+| G11 | transition 길이·제약 프레임은 Context 와 같은 방식으로 배치마다 무작위 (q 0.1, p 0.5), window 42, batch 32, Adam (0.9, 0.999) | 논문 3.6.1 | 논문과 같음 |
+| G12 | 학습 길이 max_iters 500,000, best 체크포인트 = val trans 30 손실 최소 (Context 와 같은 기준, E16). val L2P 대신 손실을 쓰는 것은 일관성 때문 | 논문: "최대 200 epoch + early stopping" | 결정 사항 |

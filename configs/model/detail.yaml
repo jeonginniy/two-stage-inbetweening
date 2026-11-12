@@ -1,0 +1,68 @@
+# =============================================================================
+# Detail Transformer 설정 (3단계)
+# -----------------------------------------------------------------------------
+# - 사용처: src/config.py 의 load_model_config("detail")
+#           → src/models/detail_transformer.py, src/training/detail.py, scripts/train_detail.py
+# - 입력/출력 차원과 관절 수는 여기에 적지 않는다. 스켈레톤 파일의 관절 수 J 에서 계산한다:
+#     입력 = D + d_mask = J*6+3 + 1 (= 136),  출력 = D + 발 접촉 4 (= 139)
+#   발 접촉 개수 = assets/skeleton_lafan1.yaml 의 contact_joints 수 (LeftFoot, LeftToe, RightFoot, RightToe)
+# - 값의 출처:
+#     [논문 x.x]  = 논문에 명시된 값
+#     [공식코드]  = 논문에 없어서 공식 config(lafan1_detail_model.json)/코드에서 가져온 값 (= 가정)
+#     [결정]      = 이 프로젝트에서 정한 값 (docs/assumptions.md G 절)
+# =============================================================================
+
+# 고정(freeze)해서 입력을 만드는 Context Transformer [논문 3.6.1] "freeze its parameters after training"
+# 체크포인트와 같은 폴더의 config.yaml (학습 때 설정) 도 함께 읽는다. 읽기만 하고 절대 덮어쓰지 않는다.
+context:
+  ckpt: experiments/ctx_base/best.pth   # [결정] val 기준 최고 (iteration 338000)
+  postprocess: true                     # [공식코드] Detail 입력을 만들 때 Context 출력에 후처리 (식 23) 적용
+
+model:
+  d_mask: 1              # [논문 3.4] m_in 은 Context 와 같음 (프레임 단위)
+  n_layer: 6             # [논문 3.6]
+  n_head: 8              # [논문 3.6]
+  d_model: 512           # [논문 3.6]
+  d_head: 64             # [공식코드]
+  d_ff: 512              # [공식코드] d_pff_inner
+  d_encoder_h: 512       # [논문 3.6] 인코더 은닉 512
+  d_decoder_h: 512       # [논문 3.6] 디코더 은닉 512
+  dropout: 0.0           # [논문 3.6.1] dropout 효과 없음
+  attn_bias: false       # [공식코드]
+  attn_scale: d_head     # [결정] Context 와 같게 (E3)
+
+train:
+  batch_size: 32         # [논문 3.6.1]
+  grad_accum_steps: 1    # [결정]
+  amp: null              # [결정] null | fp16 | bf16
+
+  # Noam 스케줄: lr(it) = base_lr × min(it × warmup^-1.5, it^-0.5)
+  #   → warmup 끝(8000)에서 최대 0.025 / sqrt(8000) ≈ 2.8e-4
+  base_lr: 0.025         # [공식코드] lr (Context 는 0.0625). 논문에는 없음
+  warmup_iters: 8000     # [논문 3.6.1]
+  adam_betas: [0.9, 0.999]   # [논문 3.6.1]
+  weight_decay: 0.0      # [공식코드]
+  grad_clip: null        # [결정]
+
+  # [가정] 논문: "최대 200 epoch + early stopping". Context 와 같게 iteration 으로 정한다.
+  max_iters: 500000
+  seed: 0
+
+  # 입력 만들기 (Context 와 같은 방식, 논문 3.6.1)
+  midway_targets_amount: 0.1   # [논문 3.6.1] q
+  midway_targets_p: 0.5        # [논문 3.6.1] p
+
+  # 기록/검증
+  log_interval: 100
+  val_interval: 2000
+  ckpt_interval: 5000
+  val_trans: [5, 15, 30]       # 마지막 값의 val 손실로 best 체크포인트를 고른다 [결정]
+  val_batch_size: 64
+  val_split: val
+
+# [논문 3.6.1, 식 22] L_det = β_rot·L_rot + β_pos·L_pos + β_c·L_c + β_foot·L_foot  (모두 L1, transition 프레임만)
+loss:
+  w_rot: 1.0             # [논문 3.6.1]
+  w_pos: 0.02            # [논문 3.6.1]
+  w_contact: 0.05        # [논문 3.6.1] β_c
+  w_foot: 0.05           # [논문 3.6.1] β_foot

@@ -7,8 +7,8 @@
 |---|---|---|
 | `config.py` | `configs/` 의 YAML 을 읽는다. 경로/device 는 반드시 여기를 거친다 | 1 |
 | `data/` | 데이터 파이프라인: BVH → 모델 입력 → 복원 (`data/README.md`) | 1 |
-| `models/` | Context Transformer (✅ 2단계), Detail Transformer (3단계 예정) | 2, 3 |
-| `training/` | Context 입력/마스크, 손실 함수(논문 3.5), 학습 한 스텝, 학습 도구 | 2, 3 |
+| `models/` | `context_transformer.py` (2단계), `detail_transformer.py` (3단계: Keyframe PE 없음, 포즈 + 발 접촉 출력), `layers.py` (공유 층) | 2, 3 |
+| `training/` | Context 입력/마스크 (`context_inputs.py`, `context.py`), Detail 입력/마스크·학습·두 단계 추론 (`detail.py`), 손실 함수 (논문 3.5, `losses.py`), 학습 도구 | 2, 3 |
 | `evaluation/` | `inference.py`: 학습된 run 불러오기, 평가셋 (official / long), 임의 길이 생성. `metrics.py`: L2P / L2Q / NPSS / 발 미끄러짐 (논문 4.1). `baselines.py`: SLERP, zero-velocity | 4 |
 | `visualization/` | `skeleton_video.py`: 구간별 색 GT \| PRED 비교 영상 (render_samples.py, render_compare.py 가 사용) | 4 |
 
