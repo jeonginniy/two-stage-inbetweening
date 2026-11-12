@@ -122,6 +122,22 @@ def load_model_config(name: str = "context") -> dict[str, Any]:
     return cfg
 
 
+def load_named_config(group: str, name: str) -> dict[str, Any]:
+    """configs/<group>/<name>.yaml 을 읽는다 (4단계 평가/시각화 설정용).
+
+    입력:
+        group - 설정 폴더 이름. 예) "eval", "viz"
+        name  - 파일 이름 (확장자 없이). 예) "lengths", "video"
+                ".yaml" 로 끝나는 경로를 주면 그 파일을 직접 읽는다 (실험용 사본 등).
+    출력:  dict (경로 값은 바꾸지 않는다. 쓰는 쪽에서 resolve_path 로 바꾼다)
+    """
+    path = Path(name) if str(name).endswith((".yaml", ".yml")) else CONFIG_DIR / group / f"{name}.yaml"
+    path = resolve_path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"{path} 가 없습니다.")
+    return load_yaml(path)
+
+
 def require_dir(path: Path | None, what: str) -> Path:
     """경로가 설정돼 있고 실제로 존재하는 폴더인지 확인한다. 아니면 친절한 에러.
 

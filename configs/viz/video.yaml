@@ -1,0 +1,52 @@
+# =============================================================================
+# 결과 영상 설정 (4단계: 교수님 미팅 피드백 [1][2])
+# -----------------------------------------------------------------------------
+# - 사용처: src/config.py 의 load_named_config("viz", "video")
+#           → scripts/render_samples.py, src/visualization/skeleton_video.py
+# - 영상은 모두 1배속 (30fps) 으로 재생한다. 구간마다 속도를 바꾸지 않는다
+#   (context → 생성 구간 경계가 자연스럽게 이어지는지 보기 위해).
+# =============================================================================
+
+# ---- 영상 구성 (프레임 수, 30fps) ----
+#   BEFORE (원본, 회색) | CONTEXT (입력) | GENERATED (생성) | TARGET (유지)
+before_frames: 30            # context 앞에 붙일 원본 프레임 수 (1초)
+target_hold_frames: 30       # target 포즈를 멈춰서 보여줄 프레임 수 (1초, target 프레임 포함)
+
+# ---- 구간 색 (matplotlib 색 이름 또는 "#rrggbb") ----
+colors:
+  before: "#9e9e9e"          # 회색
+  context: "#1f77b4"         # 파랑
+  generated: "#ff7f0e"       # 주황
+  target: "#d62728"          # 빨강
+
+# 생성 구간 동안 target 포즈를 반투명하게 겹쳐 그리기 ("어디로 향하는지" 보이게)
+target_ghost:
+  enabled: true
+  alpha: 0.25
+
+# ---- 배치 ----
+# side   : GT 와 생성을 같은 3D 축에 나란히 (진행 방향에 수직으로 side_offset 만큼 띄움)
+# panels : 좌우 두 패널 (축 범위 같게)
+# auto   : side 로 그렸을 때 두 캐릭터가 어느 프레임에서든 겹치면 panels 로 바꿈
+layout: auto
+side_offset_cm: 150
+overlap_margin_cm: 20        # auto 판단: 두 캐릭터 관절 사이 최소 수평 거리가 이보다 작으면 "겹침"
+
+# ---- 생성 ----
+# 후처리 (논문 식 23, 공식 코드 근사: 시작/끝 어긋남의 평균 δ 를 transition 전체에 더함) 적용 여부.
+# true = 학습 중 검증·공식 README "w/ post-processing" 과 같음. 학습 범위 밖 긴 길이에서는 모델이 target 에
+# 도달하지 못한 거리의 절반이 시작·끝 경계의 점프로 나타난다 (docs/assumptions.md F6). false 로 원래 출력 확인.
+postprocess: true
+
+# ---- 샘플 고르기 (피드백 [2]) ----
+# configs/eval/lengths.yaml 의 long 평가셋에서 고른다 → 길이를 바꿔도 같은 클립 (같은 시작 프레임).
+n_samples: 5
+seed: 0
+
+# ---- 출력 ----
+# {trans} = transition 길이, {seq} = BVH 이름, {start} = 모델 창 첫 프레임 (원본 BVH 프레임 번호)
+out_path: outputs/videos/trans_{trans}/{seq}_{start}.mp4
+out_path_postprocess_off: outputs/videos/trans_{trans}_nopost/{seq}_{start}.mp4   # postprocess: false 일 때
+fps: 30                      # [논문 4.1] LaFAN1 30Hz
+dpi: 100
+figsize: [12.8, 7.2]         # 인치. dpi 100 → 1280x720
