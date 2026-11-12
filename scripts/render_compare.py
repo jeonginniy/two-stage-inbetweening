@@ -50,10 +50,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
-from matplotlib import font_manager  # noqa: E402
 from matplotlib.animation import FFMpegWriter, writers  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
-from mpl_toolkits.mplot3d import proj3d  # noqa: E402
 from torch.utils.data import default_collate  # noqa: E402
 
 from src.config import load_env_config, load_yaml, require_dir, resolve_device, resolve_path  # noqa: E402
@@ -71,6 +69,8 @@ from src.training.context import (  # noqa: E402
 )
 from src.training.context_inputs import TransitionSpec  # noqa: E402
 from src.training.utils import load_checkpoint  # noqa: E402
+# 그리기 도우미는 4단계 시각화 모듈과 공유 (scripts/render_samples.py 도 사용)
+from src.visualization.skeleton_video import fit_box, pick_korean_font, to_plot  # noqa: E402
 
 FPS = 30
 UNITS_PER_METER = 100.0                     # LaFAN1 BVH 는 cm
@@ -83,7 +83,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--ckpt", type=Path, default=Path("experiments/ctx_base/best.pth"))
     ap.add_argument("--config", type=Path, default=None,
                     help="학습 때 저장된 config.yaml (기본: <ckpt 폴더>/config.yaml)")
-    ap.add_argument("--trans", type=int, default=30, choices=[5, 15, 30], help="transition 길이")
+    ap.add_argument("--trans", type=int, default=30,
+                    help="transition 길이 (val window 65 안: context + trans + 2 ≤ 65)")
     ap.add_argument("--n", type=int, default=3, help="만들 영상 수")
     ap.add_argument("--seed", type=int, default=0, help="val 클립 고르기 시드")
     ap.add_argument("--out", type=Path, default=Path("experiments/ctx_base/videos"))
@@ -177,49 +178,6 @@ def splice(full: torch.Tensor, window: torch.Tensor, pre: int, frames: slice) ->
 # -----------------------------------------------------------------------------
 # 그리기
 # -----------------------------------------------------------------------------
-def pick_korean_font() -> bool:
-    """한글 글꼴이 있으면 설정하고 True. 없으면 False (영어 라벨 사용)."""
-    names = {f.name for f in font_manager.fontManager.ttflist}
-    for cand in ("NanumGothic", "Noto Sans CJK KR", "Noto Sans KR", "UnDotum", "Malgun Gothic", "AppleGothic"):
-        if cand in names:
-            plt.rcParams["font.family"] = cand
-            plt.rcParams["axes.unicode_minus"] = False
-            return True
-    return False
-
-
-def to_plot(p: np.ndarray) -> np.ndarray:
-    """데이터 좌표 (Y 위, 오른손) → matplotlib 3D (Z 위, 오른손): (x, y, z) → (x, -z, y)."""
-    return np.stack([p[..., 0], -p[..., 2], p[..., 1]], axis=-1)
-
-
-def fit_box(fig, ax, lo: np.ndarray, hi: np.ndarray, band: tuple[float, float, float, float]) -> None:
-    """3D 상자 (lo~hi) 가 화면 영역 band = (x0, y0, x1, y1) (figure 비율) 를 최대한 채우게 한다.
-
-    matplotlib 3D 축은 항상 정사각형 영역에 그려서, 길고 납작한 장면은 넓은 화면을 다 못 쓴다.
-    그래서 축을 그림보다 큰 정사각형으로 두고, 상자 꼭짓점 8개의 화면 위치를 재서 zoom 과 축 위치를 맞춘다.
-    """
-    W, H = fig.get_size_inches() * fig.dpi
-    side = max(W, H) * 1.5
-    ax.set_position([0.5 - side / W / 2, 0.5 - side / H / 2, side / W, side / H])
-    zoom = 1.0
-    ax.set_box_aspect(tuple(hi - lo), zoom=zoom)
-    corners = np.array(np.meshgrid(*zip(lo, hi), indexing="ij")).reshape(3, -1)
-    bx0, by0, bx1, by1 = band
-    for _ in range(2):                                   # 1) 크기 맞추기 2) 위치 맞추기
-        fig.canvas.draw()
-        xs, ys, _ = proj3d.proj_transform(*corners, ax.M)
-        d = ax.transData.transform(np.c_[xs, ys]) / [W, H]          # figure 비율
-        w, h = np.ptp(d[:, 0]), np.ptp(d[:, 1])
-        k = min((bx1 - bx0) / w, (by1 - by0) / h)
-        pos = ax.get_position()
-        dx = (bx0 + bx1) / 2 - (d[:, 0].min() + d[:, 0].max()) / 2 * k - (1 - k) * (pos.x0 + pos.width / 2)
-        dy = (by0 + by1) / 2 - (d[:, 1].min() + d[:, 1].max()) / 2 * k - (1 - k) * (pos.y0 + pos.height / 2)
-        zoom *= k
-        ax.set_box_aspect(tuple(hi - lo), zoom=zoom)
-        ax.set_position([pos.x0 + dx, pos.y0 + dy, pos.width, pos.height])
-
-
 def render_video(path: Path, tracks: dict[str, np.ndarray], errors: dict[str, np.ndarray], parents,
                  head: int, phases: list[tuple[str, int, int]], trans_range: tuple[int, int],
                  title: str, korean: bool, layout: str, offset: float, dpi: int) -> None:

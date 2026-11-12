@@ -10,9 +10,16 @@ configs/
 │   └── lab.yaml      연구실 Ubuntu, cuda:0. ← lafan1_bvh_dir 을 실제 경로로 수정해야 함
 ├── data/           환경과 무관한 데이터 설정
 │   └── lafan1.yaml   context_len, window/offset, 분할(배우), 발 접촉 임계값 등
-└── model/          모델·학습 설정 (2단계~)
-    └── context.yaml  Context Transformer 크기, batch size, AMP, 학습률, 손실 가중치
+├── model/          모델·학습 설정 (2단계~)
+│   └── context.yaml  Context Transformer 크기, batch size, AMP, 학습률, 손실 가중치
+├── eval/           평가 설정 (4단계)
+│   └── lengths.yaml  체크포인트, 평가할 transition 길이 목록, 평가셋 (official / long), 배치, 출력 위치
+└── viz/            시각화 설정 (4단계)
+    └── video.yaml    구간 색, BEFORE/TARGET 유지 프레임 수, 배치 (auto/side/panels), 샘플 수 N·seed, 출력 경로
 ```
+
+`eval/`, `viz/` 는 `src/config.py` 의 `load_named_config("eval", "lengths")` 처럼 읽는다.
+스크립트의 `--eval-config`, `--video-config` 에 다른 이름이나 `.yaml` 경로를 주면 사본으로 실험할 수 있다.
 
 ## 환경 고르기
 

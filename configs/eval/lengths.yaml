@@ -1,0 +1,41 @@
+# =============================================================================
+# 평가 설정: transition 길이별 평가 (4단계)
+# -----------------------------------------------------------------------------
+# - 사용처: src/config.py 의 load_named_config("eval", "lengths")
+#           → src/evaluation/inference.py (평가셋 만들기), scripts/render_samples.py (영상 샘플 고르기),
+#             scripts/eval_lengths.py (길이별 L2P/L2Q/NPSS/발 미끄러짐)
+# - 값의 출처:
+#     [논문 x.x]  = 논문에 명시된 값
+#     [공식README] = 공식 저장소 README 에 적힌 값 (비교용 수치)
+#     [공식코드]  = 논문에 없고 공식 코드에서 확인한 값 (= 가정, docs/assumptions.md F 절)
+#     [결정]      = 이 프로젝트에서 정한 값
+# =============================================================================
+
+# 평가할 체크포인트 (학습 결과 폴더의 config.yaml 을 함께 읽는다)
+ckpt: experiments/ctx_base/best.pth
+
+# 평가할 transition 길이 (프레임, 30fps). 30 = 1초, 300 = 10초
+lengths: [5, 15, 30, 45, 60, 90, 150, 300]   # [논문 4.1 / 공식README] 5,15,30,45 + [결정] 60~300
+
+# -----------------------------------------------------------------------------
+# 평가셋 두 가지 (docs/assumptions.md F5)
+# -----------------------------------------------------------------------------
+eval_sets:
+  # [논문 4.1] 공식 벤치마크: Subject 5, window 65, offset 40 → 2232 클립.
+  # window 65 안에 context 10 + trans + target 다음 1프레임(후처리용)이 들어가야 해서
+  # trans ≤ 53 까지만 계산한다 (공식 README 수치와 비교: 5, 15, 30, 45).
+  official:
+    split: benchmark          # configs/data/lafan1.yaml 의 splits 이름 그대로 사용
+  # [결정] 긴 길이 평가셋: 모든 길이에서 "같은 시작 프레임" 의 클립을 쓴다.
+  # window = context_len + max(lengths) + 2 (= 312) 로 잘라서, 길이가 바뀌면 target 만 뒤로 간다.
+  long:
+    actors: [subject5]
+    window: auto              # auto = context_len + max(lengths) + 2
+    offset: 40
+    start_frame: 0
+
+# 평가 배치 크기. GPU 메모리가 부족하면 자동으로 절반씩 줄여 다시 시도하고 실제 값을 기록한다.
+batch_size: 64
+
+# 결과 저장 위치 (프로젝트 루트 기준, git 제외). {run} = 체크포인트 폴더 이름 (예: ctx_base)
+out_dir: outputs/eval/{run}

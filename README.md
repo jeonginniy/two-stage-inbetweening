@@ -11,7 +11,7 @@
 | 1 | 데이터 파이프라인: BVH 읽기 → 모델 입력 표현 → 원래 형태로 복원 | ✅ 완료 (연구실 실제 LaFAN1 검증 통과) |
 | **2** | **Context Transformer 구현 + 학습** | ✅ 구현·가짜 데이터 테스트 완료 / 🔬 실제 학습은 연구실 |
 | 3 | Detail Transformer 구현 + 학습 | 예정 |
-| 4 | 평가 (공식 README 수치와 비교) + 시각화 | 예정 |
+| 4 | 평가 (공식 README 수치와 비교) + 시각화 | 🔨 진행 중 (브랜치 `viz-update`): 구간별 색 비교 영상 ✅ |
 
 ### 1단계 결과 (연구실, 실제 LaFAN1)
 
@@ -40,11 +40,14 @@ two_stage_inbetweening/
 │   ├── env/laptop.yaml          노트북: LaFAN1 경로 null, device cpu
 │   ├── env/lab.yaml             연구실: LaFAN1 경로(수정 필요), device cuda:0
 │   ├── data/lafan1.yaml         context_len, window/offset, 분할, 접촉 임계값
-│   └── model/context.yaml       2단계: 모델 크기, batch size, 학습률, 손실 가중치
+│   ├── model/context.yaml       2단계: 모델 크기, batch size, 학습률, 손실 가중치
+│   ├── eval/lengths.yaml        4단계: 평가 길이 목록, 평가셋, 체크포인트
+│   └── viz/video.yaml           4단계: 구간 색, 영상 구성, 샘플 수·seed, 출력 경로
 ├── assets/
 │   └── skeleton_lafan1.yaml     22관절 이름·부모, 발 관절, 루트 앞 축
 ├── data/                      전처리 캐시 (자동 생성, git 제외)
 ├── experiments/               학습 결과: 체크포인트, 로그 (자동 생성, git 제외)
+├── outputs/                   4단계 결과: 영상, 평가 CSV/그래프 (자동 생성, git 제외)
 ├── src/                       라이브러리 코드
 │   ├── config.py                configs/ 로더
 │   └── data/                    1단계 파이프라인
@@ -63,6 +66,10 @@ two_stage_inbetweening/
 │       ├── losses.py              L_rot, L_pos, L_smooth                (논문 식 21)
 │       ├── context.py             배치 하나 학습/추론
 │       └── utils.py               Noam 학습률, 체크포인트, AMP
+│   ├── evaluation/              4단계
+│   │   └── inference.py           학습된 run 불러오기, 평가셋 (official / long), 임의 길이 생성
+│   └── visualization/           4단계
+│       └── skeleton_video.py      구간별 색 GT | PRED 비교 영상
 ├── scripts/                   실행 스크립트 (데모, 연구실 검증, 통계 계산, train_context.py)
 ├── tests/                     pytest 테스트 (+ 가짜 데이터 생성 도우미)
 └── docs/                      정리 노트
@@ -120,6 +127,7 @@ python scripts/check_bvh_roundtrip.py
 python scripts/compute_stats.py
 python scripts/compare_stats_with_official.py --official <공식repo>/tests/train_stats_context.pkl
 python scripts/train_context.py --run-name ctx_base          # 2단계 학습 (자세히: scripts/README.md)
+python scripts/render_samples.py --index 1814 --trans 30     # 4단계 구간별 색 비교 영상 → outputs/videos/
 ```
 
 ## 코드에서 쓰는 방법 (1단계 파이프라인)

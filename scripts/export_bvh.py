@@ -58,7 +58,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--ckpt", type=Path, default=Path("experiments/ctx_base/best.pth"))
     ap.add_argument("--config", type=Path, default=None,
                     help="학습 때 저장된 config.yaml (기본: <ckpt 폴더>/config.yaml)")
-    ap.add_argument("--trans", type=int, default=30, choices=[5, 15, 30], help="transition 길이")
+    ap.add_argument("--trans", type=int, default=30,
+                    help="transition 길이 (val window 65 안: context + trans + 2 ≤ 65)")
     ap.add_argument("--n", type=int, default=3, help="저장할 클립 수")
     ap.add_argument("--seed", type=int, default=0, help="val 클립 고르기 시드 (render_compare.py 와 같으면 같은 클립)")
     ap.add_argument("--total_frames", "--total-frames", dest="total_frames", type=int, default=300)

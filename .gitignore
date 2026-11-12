@@ -26,3 +26,9 @@ temp/
 # 2단계 이후 학습 결과
 experiments/
 *.pth
+
+# 논문 PDF (저작권. GitHub 에 올리지 않음)
+docs/*.pdf
+
+# 평가/시각화 결과 (scripts/render_samples.py, scripts/eval_lengths.py 가 자동 생성)
+outputs/
