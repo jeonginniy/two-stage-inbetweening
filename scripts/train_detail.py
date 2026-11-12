@@ -21,6 +21,8 @@
     python scripts/train_detail.py --run-name det_base
     python scripts/train_detail.py --run-name det_smoke --max-iters 300 --set train.log_interval=50 train.val_interval=300
     python scripts/train_detail.py --run-name det_base --resume last          # 이어서 학습
+    python scripts/train_detail.py --run-name det_cont --resume experiments/det_base/last.pth --max-iters 1000000
+                                    # 다른 폴더에서 이어서 (det_base 는 읽기만, 결과는 det_cont)
     python scripts/train_detail.py --context-ckpt experiments/ctx_base/last.pth --run-name det_from_last
 
     # 데이터 없이 스크립트가 끝까지 도는지만 확인 (가짜 BVH + 무작위 초기화 Context, 작은 모델, 결과는 의미 없음):
@@ -198,6 +200,11 @@ def main() -> None:
         raise ValueError(f"결과 폴더 {run_dir} 가 Context 폴더와 같습니다. --run-name 을 바꾸세요 (Context 결과 보호).")
     if not args.resume and (run_dir / "last.pth").exists():
         raise ValueError(f"{run_dir} 에 이미 학습 결과가 있습니다. --resume last 로 이어서 하거나 --run-name 을 바꾸세요.")
+    # 다른 폴더의 체크포인트에서 이어가기 (예: det_base/last.pth → det_cont). 원래 폴더는 읽기만 한다.
+    resume_external = bool(args.resume) and args.resume not in ("last", "best") and \
+        resolve_path(args.resume).parent.resolve() != run_dir.resolve()
+    if resume_external and (run_dir / "last.pth").exists():
+        raise ValueError(f"{run_dir} 에 이미 학습 결과가 있습니다. 다른 폴더에서 이어가려면 새 --run-name 을 쓰세요.")
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # ----- 데이터 + 고정된 Context -----
@@ -255,18 +262,27 @@ def main() -> None:
 
     iteration, epoch, best_val = 0, 0, math.inf
     if args.resume:
-        ckpt_path = run_dir / f"{args.resume}.pth" if args.resume in ("last", "best") else Path(args.resume)
+        ckpt_path = run_dir / f"{args.resume}.pth" if args.resume in ("last", "best") else resolve_path(args.resume)
         ckpt = load_checkpoint(ckpt_path, map_location=device)
+        prev_ctx = (ckpt.get("config") or {}).get("context_run", {}).get("ckpt")
+        if not args.fake_data and prev_ctx and resolve_path(prev_ctx).resolve() != resolve_path(cfg["context"]["ckpt"]).resolve():
+            raise ValueError(f"{ckpt_path} 는 Context {prev_ctx} 위에서 학습됐습니다 (지금 {cfg['context']['ckpt']}).")
         det.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
         if scaler is not None and ckpt.get("scaler"):
             scaler.load_state_dict(ckpt["scaler"])
         iteration, epoch, best_val = ckpt["iteration"], ckpt["epoch"], ckpt["best_val"]
         print(f"이어서 학습: {ckpt_path} (iteration {iteration})")
+        if resume_external:
+            # 새 폴더의 best.pth 는 "이 폴더에서 학습한 구간" 중 최고로 둔다 (첫 검증에서 반드시 저장).
+            print(f"  다른 폴더에서 이어감 → best 기준 초기화 (원래 폴더 best val {best_val:.4f})")
+            best_val = math.inf
 
     resolved = {"env": env["name"], "data": {k: str(v) if isinstance(v, Path) else v for k, v in data_cfg.items()},
                 **copy.deepcopy(cfg), "context_run": {k: ctx_info.get(k) for k in ("ckpt", "iteration", "stats")},
                 "fake_data": args.fake_data, "stats": str(stats_path)}
+    if resume_external:
+        resolved["resumed_from"] = {"ckpt": str(ckpt_path), "iteration": int(ckpt["iteration"])}
     with open(run_dir / "config.yaml", "w", encoding="utf-8") as f:
         yaml.safe_dump(resolved, f, allow_unicode=True, sort_keys=False)
 

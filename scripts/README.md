@@ -165,6 +165,8 @@ python scripts/train_detail.py --run-name det_smoke --max-iters 300 \
 nohup python scripts/train_detail.py --run-name det_base > det_base.out 2>&1 &
 # 중단 후 이어서
 python scripts/train_detail.py --run-name det_base --resume last
+# 다른 폴더의 체크포인트에서 이어서 더 길게 (원래 폴더는 읽기만, 결과는 새 폴더, config.yaml 에 resumed_from 기록)
+nohup python scripts/train_detail.py --run-name det_cont --resume experiments/det_base/last.pth --max-iters 1000000 > det_cont.out 2>&1 &
 ```
 
 출력 읽는 법:
