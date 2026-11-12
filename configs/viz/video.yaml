@@ -32,6 +32,12 @@ layout: auto
 side_offset_cm: 150
 overlap_margin_cm: 20        # auto 판단: 두 캐릭터 관절 사이 최소 수평 거리가 이보다 작으면 "겹침"
 
+# ---- 생성 ----
+# 후처리 (논문 식 23, 공식 코드 근사: 시작/끝 어긋남의 평균 δ 를 transition 전체에 더함) 적용 여부.
+# true = 학습 중 검증·공식 README "w/ post-processing" 과 같음. 학습 범위 밖 긴 길이에서는 모델이 target 에
+# 도달하지 못한 거리의 절반이 시작·끝 경계의 점프로 나타난다 (docs/assumptions.md F6). false 로 원래 출력 확인.
+postprocess: true
+
 # ---- 샘플 고르기 (피드백 [2]) ----
 # configs/eval/lengths.yaml 의 long 평가셋에서 고른다 → 길이를 바꿔도 같은 클립 (같은 시작 프레임).
 n_samples: 5
@@ -40,6 +46,7 @@ seed: 0
 # ---- 출력 ----
 # {trans} = transition 길이, {seq} = BVH 이름, {start} = 모델 창 첫 프레임 (원본 BVH 프레임 번호)
 out_path: outputs/videos/trans_{trans}/{seq}_{start}.mp4
+out_path_postprocess_off: outputs/videos/trans_{trans}_nopost/{seq}_{start}.mp4   # postprocess: false 일 때
 fps: 30                      # [논문 4.1] LaFAN1 30Hz
 dpi: 100
 figsize: [12.8, 7.2]         # 인치. dpi 100 → 1280x720

@@ -151,8 +151,11 @@ blender --background --python scripts/blender_render.py -- <클립폴더> --stil
 ## 4단계: 결과 영상 — 구간별 색 구분 (교수님 미팅 피드백 [1][2])
 
 ```bash
-python scripts/render_samples.py --index 1814              # long 평가셋 클립 1814 (walk1_subject5, 프레임 1200), trans 30
-python scripts/render_samples.py --index 1814 --trans 150  # 같은 클립, 생성 구간 5초
+python scripts/render_samples.py                           # video.yaml 의 seed 0 으로 5개, trans 30 → outputs/videos/trans_30/
+python scripts/render_samples.py --trans 90                # 같은 5개 샘플, 생성 구간 3초 → outputs/videos/trans_90/
+python scripts/render_samples.py --trans 90 --postprocess off   # 후처리 끔 → outputs/videos/trans_90_nopost/
+python scripts/render_samples.py --n 10 --seed 1           # 샘플 수/seed 덮어쓰기
+python scripts/render_samples.py --index 1814              # 클립 직접 지정 (walk1_subject5, 프레임 1200)
 ```
 
 - 설정: `configs/viz/video.yaml` (색, BEFORE 30 / TARGET 유지 30 프레임, 배치, 출력 경로),
@@ -161,7 +164,14 @@ python scripts/render_samples.py --index 1814 --trans 150  # 같은 클립, 생�
   GT 와 PRED 모두 구간 색을 따르고, GENERATED 동안 target 포즈를 반투명 빨강으로 겹쳐 그린다.
 - 배치 `layout: auto`: 같은 축에 나란히 (PRED 를 진행 방향에 수직으로 150 cm) 그렸을 때 두 캐릭터가 20 cm 보다
   가까워지는 프레임이 있으면 좌우 두 패널 (축 범위 같음) 로 바꾼다. `side` / `panels` 로 고정할 수도 있다.
-- 클립은 long 평가셋 (Subject 5, window 312, offset 40) 에서 고른다. 길이를 바꿔도 같은 시작 프레임.
+- 클립은 long 평가셋 (Subject 5, window 312, offset 40) 에서 seed 로 고른다. 이 평가셋의 클립 목록은 길이와 무관해서
+  **`--trans` 를 바꿔도 같은 시퀀스·같은 시작 프레임** 이 뽑힌다 (seed 0: aiming2 6640, obstacles1 4040,
+  pushAndStumble1 5480, run1 4800, walk3 5360). 후보는 앞에 BEFORE 30 프레임이 있는 클립.
+- 폴더마다 `samples.csv`: 시퀀스, 시작 프레임, 클립 번호, 학습 범위 안/밖, 후처리, transition 평균 오차 (cm),
+  경계 점프 `jump_start_cm` (마지막 context → 첫 생성), `jump_end_cm` (마지막 생성 → target), 배치, 영상 경로.
+  경계 점프 = 생성 쪽 프레임 간 이동 − 정답 쪽 프레임 간 이동 (관절 평균). ≈0 이면 자연스럽게 이어짐.
+- `postprocess` (식 23 후처리, 기본 켬): 학습 범위 밖에서는 모델이 target 에 못 미친 거리의 절반이 시작·끝 점프로
+  나타난다 (assumptions F6). `--postprocess off` 로 모델 원래 출력을 볼 수 있다.
 - 검증 출력: `context·target 프레임 PRED vs GT`, `BEFORE 붙인 정답 vs 모델 창 정답` 이 ≈1e-5 cm 이하가 아니면 버그.
 
 ### 데이터 없이 동작만 확인 (노트북/이 환경)

@@ -101,3 +101,14 @@ heading 해석: 처음에 "0.9 보다 크면 OK" 라고 적었지만, 실제 값
   설정 크기 모델 forward/backward (손실 유한, 모든 파라미터 gradient), 작은 모델 과적합(손실 절반 이하),
   학습 스크립트 `--fake-data` 끝까지 실행 (체크포인트/로그 생성, 이어서 학습).
 - 🔬 실제 학습, GPU 속도/VRAM, 학습된 모델의 품질 → 연구실 (`scripts/README.md` 의 "2단계: Context Transformer 학습")
+
+## F. 4단계 평가·시각화 (교수님 미팅 피드백, 브랜치 `viz-update`)
+
+코드: `src/evaluation/`, `src/visualization/`, `scripts/render_samples.py`, `scripts/eval_lengths.py`,
+설정 `configs/eval/lengths.yaml`, `configs/viz/video.yaml`. 공식 코드는 지표 정의 확인을 위해 **읽기만** 했다.
+
+| # | 내용 | 근거 | 상태 |
+|---|---|---|---|
+| F5 | 긴 길이 평가셋: Subject 5, **window = 10 + max(lengths) + 2 = 312**, offset 40, start 0 → **2151 클립**. 모든 길이에서 같은 시작 프레임 (같은 context), target 만 뒤로 이동. 공식 README 와 비교하는 5/15/30/45 는 공식 벤치마크 (window 65, 2232 클립) 로도 따로 계산 | 공식 벤치마크 window 65 에는 trans ≤ 53 만 들어감. 길이별로 같은 샘플을 비교하려면 가장 긴 길이에 맞춘 window 가 필요 | 결정 사항 |
+| F6 | 후처리 (식 23) 는 공식 코드의 근사 (E17): 시작 쪽과 끝 쪽 어긋남의 **평균** δ 를 transition 전체에 더한다. 학습 범위 밖 (예: trans 90) 에서 모델이 target 에 못 미치면 (run1_subject5 4800: 마지막 생성 프레임이 target 에서 ~2 m), δ ≈ 그 절반이 되어 **시작·끝 경계에서 각각 ~1 m 점프** 가 생긴다. 후처리를 끄면 끝 경계에서만 ~2 m 점프 | `render_samples.py` 실측 (trans 90, seed 0 샘플 5개): 후처리 켬 → 경계 점프 최대 +98.8 / +96.7 cm, 끔 → +3.2 / +197.1 cm. trans 30 에서는 ±1.5 cm 이내 | 확인됨. 영상·지표는 후처리 켬/끔 모두 제공 |
+| F7 | 영상: 모두 1배속 30fps, `[BEFORE 원본 30 (회색)] [CONTEXT 10] [GENERATED trans] [TARGET 1 + 유지 29]`. BEFORE 는 모델 입력이 아니며, 모델 창과 같은 정렬 (마지막 context 프레임 기준) 로 그린다 | 피드백 [1] + 미팅 후 요청 (재생 속도를 바꾸면 경계가 자연스러운지 판단하기 어려움) | 결정 사항 |
