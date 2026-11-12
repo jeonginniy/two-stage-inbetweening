@@ -14,6 +14,7 @@ pytest -m lab -v  # 연구실: TSI_ENV=lab 일 때 실제 LaFAN1 테스트
 | `test_dataset.py` | ✗ (가짜 BVH 폴더) | 배우 필터, 클립 수, start_frame, DataLoader→pipeline, 캐시 |
 | `test_context_model.py` | ✗ (가짜 BVH 폴더) | 2단계: 차원이 관절 수를 따름, 마스크/Keyframe PE/보간/합치기/후처리, 상대 위치 어텐션 직접 계산 비교, 마스크 동작, forward/backward, 과적합, 학습 스크립트 `--fake-data` |
 | `test_detail_model.py` | ✗ (가짜 BVH 폴더) | 3단계: 차원이 스켈레톤을 따름 (136 → 135 + 4), 마스크 (그림 5b, target 이후 가림), Detail 입력 (제약 프레임 = 정답), 고정된 Context 에 gradient 없음, L_foot 가 ĉ 로 gradient 안 보냄, L_c / L_foot 손계산, 두 단계 추론, 과적합, `train_detail.py` 가짜 데이터 실행 |
+| `test_evaluation_detail.py` | ✗ (가짜 BVH + tmp 의 가짜 학습 결과) | 4단계 두 단계 평가: `load_detail` 이 다른 Context·`--fake-data` 결과를 거부, `generate(detail=)` = `infer_two_stage`, 입력 프레임 = 정답, `eval_lengths` 의 `detail`/`detail_post` 지표 = 직접 계산한 값 |
 | `test_metrics.py` | ✗ | 4단계: 정답이면 지표 0, L2P 평행이동 불변, 쿼터니언 부호 정리, NPSS 손계산·부호 불변, 발 미끄러짐 (정지/바닥/높이), 평균 중심, 기준선 (context·target 유지, zero-velocity, SLERP) |
 | `test_visualization.py` | ✗ | 4단계: 구간 라벨 순서/길이, 영상 프레임 → 시퀀스 프레임 (target 유지), auto 배치 판단, video.yaml 읽기 |
 | `test_lafan1_real.py` | ✔ 🔬 | walk1_subject1 = 7840 프레임, 스켈레톤 일치, 위치채널=OFFSET, 실제 데이터 왕복 |
@@ -24,6 +25,6 @@ pytest -m lab -v  # 연구실: TSI_ENV=lab 일 때 실제 LaFAN1 테스트
 ```
 1단계 노트북 (2026-11-05):   48 passed, 4 skipped
 2단계 이 환경 (2026-11-05):  65 passed, 4 skipped   (Linux, Python 3.13, torch 2.15 CPU)
-3단계 연구실 (2026-11-12):   87 passed, 4 skipped
+3단계 연구실 (2026-11-12):   90 passed, 4 skipped
 ```
 skip 된 4개는 `test_lafan1_real.py` (실제 데이터 필요).
