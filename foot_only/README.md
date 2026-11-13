@@ -27,6 +27,8 @@ transition 구간에서 전신 대신 **발 관절 4개 위치 + 발 접촉 4채
 | `compute_foot_stats.py` | [실행] 발 위치 통계 → `<cache_dir>/stats/foot_only_stats.npz` |
 | `check_data.py` | [실행] 데이터 검증 (shape, FK 일치, round-trip, 접촉 그래프 → `outputs/foot_only/check_data/`) |
 | `train_foot.py` | [실행] 학습 → `experiments/foot_only/{config.yaml, log.csv, last.pth, best.pth}` |
+| `evaluate.py` | 평가 계산: `load_foot_run`, `predict_feet` (방법별 발 위치), `FootMetricAccumulator` (발 L2, 접촉 F1, 발 미끄러짐) |
+| `eval_foot.py` | [실행] 평가 → `outputs/eval/foot_only/{metrics_long.csv, summary.csv, metrics.png, run_info.json}` |
 
 ## 실행 순서 (프로젝트 루트)
 
@@ -78,7 +80,28 @@ val 분할 (560 클립, 제약 프레임·후처리 없음). 자세한 내용은
 | 30 | 6.75 | 0.868 | 0.806 | 0.70 / 0.69 | 0.80 / 0.80 |
 
 - 발목 접촉 F1 은 50k 이후 0.68–0.70 에서 오르지 않는다 (발끝보다 ~0.1 낮음). pos_weight 재학습은 평가 뒤 결정.
-- 다음 평가 (ctx_base / Two-stage / SLERP 와 비교, 길이 5–90) 준비 메모: `docs/foot_only_eval_plan.md`.
+- 평가 계획·결정: `docs/foot_only_eval_plan.md`.
+
+## 평가 (`python foot_only/eval_foot.py`, 약 1분)
+
+설정 `configs/eval/foot_only.yaml` + `configs/eval/lengths.yaml` (ctx_base, det_cont, 평가셋, 발 미끄러짐 설정).
+모든 방법을 같은 정답 창에서 발 4관절 위치로 바꿔 같은 함수로 계산한다. 접촉 F1 은 두 가지:
+`pos` = 예측 위치를 월드 좌표로 되돌려 라벨 규칙으로 판정 (모든 방법), `out` = 접촉 출력 > 0.5 (foot-only, Two-stage).
+`gt` 행은 검산용 (위치 판정 acc 1.000, 발 미끄러짐 = GT 값).
+
+공식 벤치마크 2232 클립 (trans 30) / long 평가셋 (trans 90). 결과 전체는 `docs/assumptions.md` H10:
+
+| 방법 | 발 L2 (cm) 30 / 90 | 발 미끄러짐 30 / 90 (GT 0.08) | 접촉 F1 pos 30 | 접촉 F1 out 30 (발목 / 발끝) |
+|---|---|---|---|---|
+| foot-only | **6.91** / **50.0** | **0.191** / **0.569** | **0.583** | **0.768** (0.70 / 0.80) |
+| Two-stage (ctx_base + det_cont) | 7.81 / 52.5 | 0.281 / 1.164 | 0.414 | 0.740 (0.65 / 0.78) |
+| Context + 후처리 | 8.89 / 52.1 | 0.476 / 1.445 | 0.174 | - |
+| Context, 후처리 없음 | 8.96 / 52.4 | 0.478 / 1.371 | 0.176 | - |
+| SLERP | 24.40 / 62.8 | 1.632 / 1.169 | 0.246 | - |
+
+- 학습 범위 안에서는 발 위치·발 미끄러짐·접촉 모두 foot-only 가 가장 좋다 (trans 5 발 L2 만 Two-stage 0.96 < 1.00).
+- 학습 범위 밖 (60, 90) 에서는 모든 모델이 크게 틀리고 차이가 줄어든다.
+- 위치로 판정한 접촉 F1 이 출력보다 훨씬 낮다: 예측 발이 접촉 구간에서 멈춰 있지 못함 (recall 발끝 0.41).
 
 ## log.csv (iteration, epoch, kind, name, value)
 

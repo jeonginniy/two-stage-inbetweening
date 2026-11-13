@@ -200,3 +200,74 @@ def test_train_foot_script_fake_data(tmp_path):
         assert r.returncode == 0 and "iteration 6" in r.stdout and "끝: iteration 9" in r.stdout, r.stdout + r.stderr
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
+
+
+# -----------------------------------------------------------------------------
+# 평가 (foot_only/evaluate.py)
+# -----------------------------------------------------------------------------
+def test_motion_name():
+    from foot_only.evaluate import motion_name
+    assert motion_name("walk3_subject5") == "walk"
+    assert motion_name("pushAndStumble1_subject5") == "pushAndStumble"
+    assert motion_name("fightAndSports1_subject1") == "fightAndSports"
+
+
+def test_position_contacts_gt_matches_labels(fake):
+    """정답 발 위치를 월드 좌표로 되돌려 판정한 접촉 = 데이터셋 라벨 (마지막 프레임 제외, H4)."""
+    from foot_only.evaluate import position_contacts
+    data_cfg, skel, layout, ds, ctx_norm, foot_norm = fake
+    ctx = data_cfg["context_len"]
+    b = _batch(ds)
+    fb = prepare_foot_batch(b, skel, ctx_norm, foot_norm, ctx)
+    B, T = fb.foot_raw.shape[:2]
+    pc = position_contacts(fb.foot_raw.reshape(B, T, 4, 3), canonical_frame(b, skel, ctx),
+                           data_cfg["contact_vel_threshold"])
+    assert torch.equal(pc[:, :-1], b["contacts"][:, :-1])
+
+
+def _fake_runs(fake):
+    """작은 Context / 발 전용 모델로 LoadedRun, FootRun 흉내 (값은 의미 없음)."""
+    from foot_only.evaluate import FootRun
+    from src.evaluation.inference import LoadedRun
+    from src.models.context_transformer import build_context_transformer
+    data_cfg, skel, layout, ds, ctx_norm, foot_norm = fake
+    torch.manual_seed(0)
+    ctx_model = build_context_transformer(TINY, layout).eval()
+    foot_model = build_foot_model(TINY, layout).eval()
+    run = LoadedRun({}, data_cfg, {"num_workers": 0}, torch.device("cpu"), skel, layout, ctx_norm, ctx_model, {},
+                    Path("fake/ctx"))
+    foot = FootRun({}, foot_model, ctx_norm, foot_norm, LOSS_W, {}, Path("fake/foot"))
+    return run, foot
+
+
+def test_predict_feet_and_accumulator(fake):
+    """방법별 발 위치 shape, transition 밖 = 정답, GT 검산 행 (접촉 acc 1, 발 미끄러짐 = 전신 함수 값)."""
+    from foot_only.evaluate import FootMetricAccumulator, predict_feet
+    from src.evaluation.metrics import foot_skating_per_clip
+    data_cfg, skel, layout, ds, ctx_norm, foot_norm = fake
+    run, foot = _fake_runs(fake)
+    methods = ["foot_only", "ctx_post", "ctx_nopost", "interp"]
+    b = _batch(ds, 6)
+    fp = predict_feet(b, 20, run, methods, foot=foot)
+    L = data_cfg["context_len"] + 22
+    s = fp.spec.seq_slice
+    outside = [t for t in range(L) if not (s.start <= t < s.stop)]
+    assert set(fp.preds) == set(methods) | {"gt"}
+    for m, (feet, prob) in fp.preds.items():
+        assert feet.shape == (6, L, 4, 3)
+        assert torch.allclose(feet[:, outside], fp.feet_gt[:, outside], atol=1e-3), m
+        assert (prob is not None) == (m == "foot_only")
+    acc = FootMetricAccumulator([1, 3], 3.0, data_cfg["contact_vel_threshold"])
+    acc.add(["walk"] * 3 + ["run"] * 3, fp)
+    rows = acc.rows()
+    get = lambda **kw: [r["value"] for r in rows if all(r[k] == v for k, v in kw.items())]   # noqa: E731
+    assert get(method="gt", source="pos", motion="all", joint="all", metric="acc") == [1.0]
+    assert get(method="gt", motion="all", joint="all", metric="foot_l2") == [0.0]
+    assert get(method="foot_only", motion="walk", metric="n_clips") == [3]
+    assert get(method="foot_only", source="out", motion="all", joint="all", metric="n_frames") == [6 * 20 * 4]
+    # 발 4관절 배열로 계산한 발 미끄러짐 = 전신 (발끝 4, 8) 으로 계산한 값
+    gpos = fp.preds["gt"][0]
+    full = torch.zeros(6, L, skel.num_joints, 3)
+    full[:, :, [3, 4, 7, 8]] = gpos
+    ref = foot_skating_per_clip(full, [4, 8], 3.0, s).mean().item()
+    assert get(method="gt", motion="all", metric="foot_skate")[0] == pytest.approx(ref, rel=1e-5)

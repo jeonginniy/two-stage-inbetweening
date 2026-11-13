@@ -1,7 +1,8 @@
 # 발 전용 모델: 다음 평가 준비 메모
 
-브랜치 `feat/foot-only`. 학습은 끝났고 (`experiments/foot_only/best.pth` = iteration 454000), 평가·시각화는
-다음 작업이다. 이 문서는 그 작업을 시작할 때 필요한 결정·주의점을 모아 둔 것이다 (아직 코드 없음).
+브랜치 `feat/foot-only`. 학습은 끝났고 (`experiments/foot_only/best.pth` = iteration 454000), 이 문서는 평가를
+시작할 때 정한 결정·주의점이다. **평가는 구현·실행 완료**: `python foot_only/eval_foot.py` (설정 `configs/eval/foot_only.yaml`)
+→ `outputs/eval/foot_only/`, 결과 요약은 `docs/assumptions.md` H10. 시각화 (영상) 는 아직.
 가정 번호는 `docs/assumptions.md` H 절.
 
 ## 1. 비교 대상
@@ -51,7 +52,7 @@
 3. **체크포인트 불러오기**. `inference.load_run` 은 ContextTransformer (입력 136) 를 만들기 때문에 foot-only 를
    못 읽는다. `experiments/foot_only/config.yaml` (`model`, `data`, `foot_data` 절) 로 `build_foot_model` +
    두 정규화 통계를 만드는 로더를 `foot_only/` 에 새로 둔다. 클립 자르기 (ctx + trans + 2) 는 `prepare_window` 와 같게.
-4. 평가 스크립트·결과는 새 파일 `foot_only/eval_foot.py` → `outputs/eval/foot_only/` 를 제안 (기존 eval 파일 수정 없이).
+4. 평가 스크립트·결과: `foot_only/evaluate.py` (계산) + `foot_only/eval_foot.py` (실행) → `outputs/eval/foot_only/` (기존 eval 파일 수정 없음). 구현됨.
 
 ## 5. 학습 중 val 기록 (참고, best.pth = 454k)
 

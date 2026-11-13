@@ -1,0 +1,31 @@
+# =============================================================================
+# 발 전용 모델 평가 설정 (feat/foot-only, docs/foot_only_eval_plan.md)
+# -----------------------------------------------------------------------------
+# - 사용처: foot_only/eval_foot.py (load_named_config("eval", "foot_only"))
+# - 나머지 평가 설정은 configs/eval/lengths.yaml 을 그대로 쓴다 (기존 평가와 같은 조건):
+#     ckpt (ctx_base), detail_ckpt (det_cont), eval_sets (official / long 의 window·시작 프레임),
+#     foot_skating (발끝 2개, 높이 3 cm), batch_size
+# - 값의 출처: [결정] = 발 전용 평가에서 정한 값 (docs/foot_only_eval_plan.md)
+# =============================================================================
+
+# 평가할 발 전용 체크포인트 (같은 폴더의 config.yaml 을 함께 읽는다)
+foot_ckpt: experiments/foot_only/best.pth     # [결정] iteration 454000 (H9)
+
+# 평가셋별 transition 길이 [결정] (official 은 window 65 라 trans ≤ 53)
+lengths:
+  official: [5, 15, 30, 45]      # 학습 범위 5–30 + 공식 45 (README 비교 길이)
+  long: [30, 60, 90]             # 길이 사이 비교 (모든 길이에서 같은 시작 프레임). 60, 90 = 학습 범위 밖
+
+# 비교 방법 [결정 2026-11-14]
+#   foot_only  : 발 전용 모델 (후처리 없음; 발 위치용 식 23 없음, 미정)
+#   ctx_post   : Context Transformer + 후처리 (식 23)
+#   ctx_nopost : Context Transformer, 후처리 없음
+#   two_stage  : ctx_base + det_cont (Detail 출력 후처리 없음, G4)
+#   interp     : SLERP 보간
+methods: [foot_only, ctx_post, ctx_nopost, two_stage, interp]
+
+# 동작별 표를 콘솔에 출력할 동작 (CSV 에는 모든 동작이 들어간다)
+print_motions: [walk, run]
+
+# 결과 저장 위치 (프로젝트 루트 기준, git 제외)
+out_dir: outputs/eval/foot_only

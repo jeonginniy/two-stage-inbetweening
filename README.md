@@ -12,7 +12,7 @@
 | **2** | **Context Transformer 구현 + 학습** | ✅ 구현·가짜 데이터 테스트 완료 / 🔬 실제 학습은 연구실 |
 | 3 | Detail Transformer 구현 + 학습 | ✅ 구현·학습 완료. 최종 = `experiments/det_cont/best.pth` (1M 까지 이어서 학습, iteration 978000; 500k 판은 `det_base`). 결과는 아래 "3단계 결과" |
 | 4 | 평가 (공식 README 수치와 비교) + 시각화 | 🔨 브랜치 `viz-update`: 구간별 색 비교 영상 ✅, 길이별 L2P/L2Q/NPSS/발 미끄러짐 ✅ (Context only) |
-| 발 | 발 전용 In-betweening (교수님 피드백: 발만 먼저 예측) | ✅ 학습 완료 (브랜치 `feat/foot-only`, `experiments/foot_only/best.pth` = iteration 454000) / ⏳ 평가·시각화는 다음 작업 |
+| 발 | 발 전용 In-betweening (교수님 피드백: 발만 먼저 예측) | ✅ 학습·평가 완료 (브랜치 `feat/foot-only`, `experiments/foot_only/best.pth` = iteration 454000, `outputs/eval/foot_only/`) / ⏳ 시각화 |
 
 ### 1단계 결과 (연구실, 실제 LaFAN1)
 
@@ -113,8 +113,21 @@ Context Transformer 구조와 ctx_base 학습 설정을 그대로 쓰고 입출�
 | 30 | 6.75 | 0.868 | 0.70 / 0.69 | 0.80 / 0.80 |
 
 - 발목 접촉 F1 은 발끝보다 ~0.1 낮고 50k 이후 오르지 않는다 (H9).
-- ctx_base / Two-stage (det_cont) / SLERP 와의 비교 (공식·long 평가셋, 길이 5–90, 발 L2·관절/동작별 접촉 F1·발 미끄러짐) 는
-  다음 작업. 준비 메모: [docs/foot_only_eval_plan.md](docs/foot_only_eval_plan.md).
+
+평가 (`python foot_only/eval_foot.py`, 공식 벤치마크 2232 클립 / long 평가셋, 발 4관절만 비교, H10):
+
+| trans | 발 L2 (cm) foot-only / Two-stage / Context+후처리 / SLERP | 발 미끄러짐 (cm/frame, GT 0.08) 같은 순서 |
+|---|---|---|
+| 5 | 1.00 / **0.96** / 1.28 / 3.78 | **0.102** / 0.140 / 0.177 / 1.181 |
+| 15 | **2.73** / 3.17 / 4.00 / 14.22 | **0.110** / 0.179 / 0.315 / 1.936 |
+| 30 | **6.91** / 7.81 / 8.89 / 24.40 | **0.191** / 0.281 / 0.476 / 1.632 |
+| 45 (밖) | **14.67** / 15.82 / 16.98 / 32.35 | **0.334** / 0.555 / 0.909 / 1.544 |
+| 60 (밖, long) | **25.06** / 26.84 / 27.93 / 42.56 | **0.445** / 0.895 / 1.258 / 1.417 |
+| 90 (밖, long) | **50.04** / 52.52 / 52.10 / 62.83 | **0.569** / 1.164 / 1.445 / 1.169 |
+
+- 발만 예측하면 발 위치·발 미끄러짐 모두 Two-stage 보다 좋다 (trans 30 발 미끄러짐 −32%). 접촉 출력 F1 도 0.768 vs 0.740.
+- 하지만 학습 범위 밖에서는 발 전용 모델도 같이 무너진다 (trans 90 발 L2 50 cm). 긴 구간 문제는 출력 차원을 줄여도 남는다.
+- 결과: `outputs/eval/foot_only/`, 계획·결정: [docs/foot_only_eval_plan.md](docs/foot_only_eval_plan.md).
 
 ## 폴더 구조
 
