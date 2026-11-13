@@ -223,7 +223,7 @@ python scripts/eval_lengths.py --lengths 30 600 --sets long            # 설정�
   - `long`: Subject 5, window 312 (= 10 + 300 + 2), offset 40, 2151 클립. **모든 길이에서 같은 시작 프레임** → 길이별 비교.
 - 방법: `model` (+후처리 식 23), `model_nopost`, `interp` (SLERP), `zerov`,
   `detail` (두 단계: Context + 후처리 → Detail, Detail 출력 후처리 없음 = README Detail 수치와 같은 조건), `detail_post` (Detail 출력에도 후처리).
-  `detail*` 는 `lengths.yaml` 의 `detail_ckpt` (기본 `experiments/det_base/best.pth`) 가 있을 때만 계산하고, 없으면 건너뛴다.
+  `detail*` 는 `lengths.yaml` 의 `detail_ckpt` (기본 `experiments/det_cont/best.pth`, 최종 Two-stage) 가 있을 때만 계산하고, 없으면 건너뛴다.
   Detail 학습 때 고정한 Context 가 `ckpt` 와 다르면 시작하지 않는다. Detail 을 넣으면 결과 폴더는 `outputs/eval/<det run>/`.
   README Detail 비교: `python scripts/eval_lengths.py --sets official --lengths 5 15 30 45 --methods model detail`
 - 결과 (`outputs/eval/<run>/`)

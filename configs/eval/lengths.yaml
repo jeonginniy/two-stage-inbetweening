@@ -15,7 +15,7 @@
 ckpt: experiments/ctx_base/best.pth
 # [결정] 3단계 Detail Transformer (방법 detail / detail_post). 학습 때 고정한 Context 가 위 ckpt 와 같아야 한다.
 # 파일이 없으면 detail 방법은 건너뛴다 (--methods 로 직접 요청하면 에러).
-detail_ckpt: experiments/det_base/best.pth
+detail_ckpt: experiments/det_cont/best.pth   # [결정] 최종 Two-stage (iteration 978000, G18). det_base (500k) 는 --detail-ckpt 로 지정
 
 # 평가할 transition 길이 (프레임, 30fps). 30 = 1초, 300 = 10초
 lengths: [5, 15, 30, 45, 60, 90, 150, 300]   # [논문 4.1 / 공식README] 5,15,30,45 + [결정] 60~300

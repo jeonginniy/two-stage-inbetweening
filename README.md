@@ -10,7 +10,7 @@
 |---|---|---|
 | 1 | 데이터 파이프라인: BVH 읽기 → 모델 입력 표현 → 원래 형태로 복원 | ✅ 완료 (연구실 실제 LaFAN1 검증 통과) |
 | **2** | **Context Transformer 구현 + 학습** | ✅ 구현·가짜 데이터 테스트 완료 / 🔬 실제 학습은 연구실 |
-| 3 | Detail Transformer 구현 + 학습 | ✅ 브랜치 `detail-transformer`: 구현·학습 완료 (500k, `experiments/det_base/best.pth` = iteration 498000). 결과는 아래 "3단계 결과" |
+| 3 | Detail Transformer 구현 + 학습 | ✅ 구현·학습 완료. 최종 = `experiments/det_cont/best.pth` (1M 까지 이어서 학습, iteration 978000; 500k 판은 `det_base`). 결과는 아래 "3단계 결과" |
 | 4 | 평가 (공식 README 수치와 비교) + 시각화 | 🔨 브랜치 `viz-update`: 구간별 색 비교 영상 ✅, 길이별 L2P/L2Q/NPSS/발 미끄러짐 ✅ (Context only) |
 
 ### 1단계 결과 (연구실, 실제 LaFAN1)
