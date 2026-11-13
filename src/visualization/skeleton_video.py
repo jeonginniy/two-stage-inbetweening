@@ -244,6 +244,7 @@ def render_comparison_video(
     title: str,
     frame_info: Sequence[str],
     error_cm: np.ndarray,
+    pred_label: str = "PRED (Context Transformer)",
 ) -> str:
     """GT | PRED 비교 영상 저장 (피드백 [1][2]).
 
@@ -258,6 +259,7 @@ def render_comparison_video(
         title       : 맨 위 제목
         frame_info  : (F,) 프레임마다 오른쪽 위에 쓸 문자열 (예: "frame 052/099  BVH #1234")
         error_cm    : (F,) 프레임별 PRED vs GT 평균 관절 위치 오차 (cm)
+        pred_label  : panels 배치일 때 오른쪽 패널 제목 (두 단계 영상이면 "PRED (Context + Detail)")
     출력:  실제로 쓴 배치 ("side" 또는 "panels")
     """
     F, J, _ = gt.shape
@@ -300,7 +302,7 @@ def render_comparison_video(
             for k in pts}
     if layout == "panels":
         for k, x in (("gt", 0.25), ("pred", 0.75)):
-            fig.text(x, band_top + 0.005, {"gt": "GT (ground truth)", "pred": "PRED (Context Transformer)"}[k],
+            fig.text(x, band_top + 0.005, {"gt": "GT (ground truth)", "pred": pred_label}[k],
                      ha="center", fontsize=12, weight="bold", color="0.25")
 
     # 위: 제목, 구간 이름, 프레임 번호, 범례

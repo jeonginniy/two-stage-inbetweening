@@ -11,7 +11,8 @@ configs/
 ├── data/           환경과 무관한 데이터 설정
 │   └── lafan1.yaml   context_len, window/offset, 분할(배우), 발 접촉 임계값 등
 ├── model/          모델·학습 설정 (2단계~)
-│   └── context.yaml  Context Transformer 크기, batch size, AMP, 학습률, 손실 가중치
+│   ├── context.yaml  Context Transformer 크기, batch size, AMP, 학습률, 손실 가중치
+│   └── detail.yaml   Detail Transformer (3단계): 고정할 Context 체크포인트, 크기, 학습률 0.025, 손실 가중치 (rot/pos/contact/foot)
 ├── eval/           평가 설정 (4단계)
 │   └── lengths.yaml  체크포인트, 평가할 transition 길이 목록, 평가셋 (official / long), 배치, 출력 위치
 └── viz/            시각화 설정 (4단계)
@@ -38,14 +39,10 @@ configs/
 
 ## 모델 입력/출력 차원
 
-`model/context.yaml` 에는 입력/출력 차원과 관절 수를 **적지 않는다**. `data/lafan1.yaml` 이 가리키는
+`model/context.yaml`, `model/detail.yaml` 에는 입력/출력 차원과 관절 수를 **적지 않는다** (Detail 출력 = D + 발 접촉 관절 수 = 139). `data/lafan1.yaml` 이 가리키는
 스켈레톤 파일의 관절 수 J 에서 D = J×6+3 (=135), 입력 = D+1 (=136), 출력 = D 를 계산한다.
 
 ## 학습 설정 덮어쓰기
 
 `scripts/train_context.py --batch-size 16 --grad-accum 2 --amp bf16 --set model.n_layer=4` 처럼
 실행할 때 바꿀 수 있다. 실제로 쓴 설정은 `experiments/<run>/config.yaml` 에 저장된다.
-
-## 앞으로 추가될 것
-
-- `model/detail.yaml` (3단계)

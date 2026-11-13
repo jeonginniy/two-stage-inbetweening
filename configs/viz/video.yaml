@@ -47,6 +47,7 @@ seed: 0
 # {trans} = transition 길이, {seq} = BVH 이름, {start} = 모델 창 첫 프레임 (원본 BVH 프레임 번호)
 out_path: outputs/videos/trans_{trans}/{seq}_{start}.mp4
 out_path_postprocess_off: outputs/videos/trans_{trans}_nopost/{seq}_{start}.mp4   # postprocess: false 일 때
+out_path_detail: outputs/videos/trans_{trans}_detail/{seq}_{start}.mp4             # --stage detail (두 단계, 3단계)
 fps: 30                      # [논문 4.1] LaFAN1 30Hz
 dpi: 100
 figsize: [12.8, 7.2]         # 인치. dpi 100 → 1280x720

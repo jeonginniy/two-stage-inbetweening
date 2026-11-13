@@ -11,8 +11,11 @@
 3. 평가셋 × 길이 × 방법마다 지표 계산 (src/evaluation/metrics.py)
      평가셋 official : 공식 벤치마크 (Subject 5, window 65, offset 40, 2232 클립). trans ≤ 53 만 (README 비교: 5/15/30/45)
      평가셋 long     : Subject 5, window 10 + max(lengths) + 2, offset 40 (2151 클립). 모든 길이에서 같은 시작 프레임
-     방법: model (Context Transformer + 후처리 식 23), model_nopost (후처리 없음), interp (SLERP), zerov (zero-velocity)
-   Detail Transformer 는 아직 구현·학습되지 않아 Context Transformer 만 평가한다.
+     방법: model (Context Transformer + 후처리 식 23), model_nopost (후처리 없음), interp (SLERP), zerov (zero-velocity),
+           detail (두 단계: Context + 후처리 → Detail, Detail 출력은 후처리 없음 = 공식 README Detail 수치와 같은 조건),
+           detail_post (두 단계 + Detail 출력에도 후처리)
+   detail 방법은 lengths.yaml 의 detail_ckpt (또는 --detail-ckpt) 가 있어야 한다. Detail 학습 때 고정한 Context 가
+   ckpt 와 다르면 시작하지 않는다 (src.evaluation.inference.load_detail).
 4. 저장 (outputs/eval/<run>/)
      metrics_by_length.csv : 평가셋, 클립 수, 길이 (프레임/초), 학습 범위 안/밖, 방법, L2P, L2Q, NPSS,
                              발 미끄러짐 (예측/GT), README 수치 (official 평가셋), 실제 배치 크기
@@ -29,6 +32,8 @@
     python scripts/eval_lengths.py --sets official --methods interp zerov  # 기준선만 (지표 구현 확인용)
     python scripts/eval_lengths.py --lengths 30 60 --sets long --batch-size 32
     python scripts/eval_lengths.py --render                                 # + 길이별 샘플 영상
+    python scripts/eval_lengths.py --sets official --lengths 5 15 30 45 --methods model detail   # README Detail 비교
+    python scripts/eval_lengths.py --detail-ckpt experiments/det_base/last.pth --methods detail  # 학습 중간 확인
 """
 
 from __future__ import annotations
@@ -57,9 +62,11 @@ from src.config import load_named_config, resolve_path  # noqa: E402
 from src.data.dataset import LafanDataset  # noqa: E402
 from src.evaluation.baselines import interpolation, zero_velocity  # noqa: E402
 from src.evaluation.inference import (  # noqa: E402
+    DetailRun,
     LoadedRun,
     build_eval_dataset,
     describe,
+    load_detail,
     load_run,
     max_trans_for_window,
     prepare_window,
@@ -74,9 +81,12 @@ from src.evaluation.metrics import (  # noqa: E402
 )
 from src.training.context import run_model  # noqa: E402
 from src.training.context_inputs import postprocess  # noqa: E402
+from src.training.detail import run_detail  # noqa: E402
 
-METHODS = ("model", "model_nopost", "interp", "zerov")
+METHODS = ("model", "model_nopost", "detail", "detail_post", "interp", "zerov")
+DETAIL_METHODS = ("detail", "detail_post")
 METHOD_LABEL = {"model": "Context Transformer (+post)", "model_nopost": "Context Transformer (no post)",
+                "detail": "Two-stage (Context+Detail)", "detail_post": "Two-stage (+post on Detail)",
                 "interp": "Interpolation (SLERP)", "zerov": "Zero-velocity"}
 METRICS = ("L2P", "L2Q", "NPSS", "foot_skate")
 
@@ -87,6 +97,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--sets", nargs="+", choices=["official", "long"], default=["official", "long"])
     ap.add_argument("--methods", nargs="+", choices=METHODS, default=None, help="기본: lengths.yaml 의 methods")
     ap.add_argument("--ckpt", type=Path, default=None, help="기본: lengths.yaml 의 ckpt")
+    ap.add_argument("--detail-ckpt", type=Path, default=None, help="기본: lengths.yaml 의 detail_ckpt")
     ap.add_argument("--eval-config", default="lengths", help="configs/eval/<이름>.yaml 또는 .yaml 경로")
     ap.add_argument("--batch-size", type=int, default=None, help="기본: lengths.yaml 의 batch_size")
     ap.add_argument("--out", default=None, help="출력 폴더 (기본: lengths.yaml 의 out_dir)")
@@ -125,11 +136,13 @@ def load_bench_stats(run: LoadedRun, ecfg: dict) -> tuple[torch.Tensor, torch.Te
 # -----------------------------------------------------------------------------
 @torch.no_grad()
 def eval_one_length(run: LoadedRun, ds, trans: int, methods: list[str], batch_size: int,
-                    mean: torch.Tensor, std: torch.Tensor, foot_idx: list[int], height_cm: float) -> dict:
+                    mean: torch.Tensor, std: torch.Tensor, foot_idx: list[int], height_cm: float,
+                    det: DetailRun | None = None) -> dict:
     """평가셋 ds 전체에서 transition `trans` 의 방법별 지표.
 
     배치마다: 정답 창 (prepare_window) → 방법별 예측 (정렬된 원값 (B, L, D)) → FK → 전역 쿼터니언 → 지표 누적.
     모델은 한 번만 돌리고, 후처리 (식 23) 는 그 출력에 따로 적용해서 model / model_nopost 를 같이 얻는다.
+    detail 은 같은 Context 출력 (Detail 학습 설정대로 후처리) 을 Detail 에 넣는다 (src.training.detail.run_detail).
     출력:  {방법: {"L2P", "L2Q", "NPSS", "foot_skate", "n_clips"}, "_gt_skate": GT 발 미끄러짐}
     """
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=run.env["num_workers"])
@@ -143,12 +156,19 @@ def eval_one_length(run: LoadedRun, ds, trans: int, methods: list[str], batch_si
         gt_skate.append(foot_skating_per_clip(gpos_gt, foot_idx, height_cm, s).cpu().numpy())
 
         preds = {}
-        if "model" in methods or "model_nopost" in methods:
+        if any(m in methods for m in ("model", "model_nopost", *DETAIL_METHODS)):
             y = run_model(run.model, pb.x_gt, spec, run.layout)          # (B, L, D) 정규화, transition 만 예측
+            y_post = postprocess(y, pb.x_gt, spec)
             if "model_nopost" in methods:
                 preds["model_nopost"] = run.norm.denormalize(y)
             if "model" in methods:
-                preds["model"] = run.norm.denormalize(postprocess(y, pb.x_gt, spec))
+                preds["model"] = run.norm.denormalize(y_post)
+            if any(m in methods for m in DETAIL_METHODS):
+                y_det, _ = run_detail(det.model, y_post if det.ctx_postprocess else y, pb.x_gt, spec)
+                if "detail" in methods:
+                    preds["detail"] = run.norm.denormalize(y_det)
+                if "detail_post" in methods:
+                    preds["detail_post"] = run.norm.denormalize(postprocess(y_det, pb.x_gt, spec))
         if "interp" in methods:
             preds["interp"] = interpolation(pb.x_gt_raw, spec, run.layout)
         if "zerov" in methods:
@@ -162,12 +182,12 @@ def eval_one_length(run: LoadedRun, ds, trans: int, methods: list[str], batch_si
     return out
 
 
-def eval_with_retry(run, ds, trans, methods, batch_size, *stat_args) -> tuple[dict, int]:
+def eval_with_retry(run, ds, trans, methods, batch_size, *stat_args, det=None) -> tuple[dict, int]:
     """eval_one_length + GPU 메모리 부족 시 배치를 절반으로 줄여 처음부터 다시. 출력: (결과, 실제 배치 크기)."""
     bs = batch_size
     while True:
         try:
-            return eval_one_length(run, ds, trans, methods, bs, *stat_args), bs
+            return eval_one_length(run, ds, trans, methods, bs, *stat_args, det=det), bs
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
             if bs == 1:
@@ -191,7 +211,8 @@ def plot_lengths(rows: list[dict], train_range: tuple[int, int], path: Path, run
     if not long_rows:
         return
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-    colors = {"model": "tab:orange", "model_nopost": "tab:red", "interp": "tab:blue", "zerov": "tab:gray"}
+    colors = {"model": "tab:orange", "model_nopost": "tab:red", "detail": "tab:purple", "detail_post": "tab:pink",
+              "interp": "tab:blue", "zerov": "tab:gray"}
     for ax, metric in zip(axes.flat, METRICS):
         ax.axvspan(train_range[0], train_range[1], color="tab:green", alpha=0.10, lw=0,
                    label=f"training range {train_range[0]}–{train_range[1]}")
@@ -204,7 +225,7 @@ def plot_lengths(rows: list[dict], train_range: tuple[int, int], path: Path, run
             ax.plot(*zip(*pts), "--", color="black", lw=1.2, label="GT")
         else:
             k = METRICS.index(metric)
-            for m in ("model", "interp"):
+            for m in ("model", "detail", "interp"):
                 ref = sorted({(r["trans"], r[f"readme_{metric}"]) for r in rows
                               if r["set"] == "official" and r["method"] == m and r[f"readme_{metric}"] is not None})
                 if ref:
@@ -258,12 +279,25 @@ def main() -> None:
     info = describe(run)
     print(f"체크포인트 {info['ckpt']} (iteration {info['iteration']}), device={run.device}, "
           f"context {run.ctx}, 학습 transition 범위 {run.train_range}")
-    print("Detail Transformer 는 구현·학습되지 않아 Context Transformer 만 평가합니다.")
+    det = None
+    if any(m in methods for m in DETAIL_METHODS):
+        det_ckpt = args.detail_ckpt or ecfg.get("detail_ckpt")
+        if not det_ckpt or not resolve_path(det_ckpt).exists():
+            if args.methods:                                   # 직접 요청했으면 에러
+                raise FileNotFoundError(f"Detail 체크포인트 {det_ckpt} 가 없습니다 (--detail-ckpt).")
+            methods = [m for m in methods if m not in DETAIL_METHODS]
+            print(f"[알림] Detail 체크포인트 {det_ckpt} 가 없어 detail 방법은 건너뜁니다 (Context 만 평가).")
+        else:
+            det = load_detail(det_ckpt, run)
+            info["detail"] = {"ckpt": str(det.ckpt_path), "iteration": int(det.ckpt["iteration"]),
+                              "best_val": float(det.ckpt["best_val"]), "ctx_postprocess": det.ctx_postprocess}
+            print(f"Detail 체크포인트 {det.ckpt_path} (iteration {det.ckpt['iteration']}), "
+                  f"Context 후처리 {'켬' if det.ctx_postprocess else '끔'} → Detail (Detail 출력 후처리: detail_post 만)")
 
     mean, std = load_bench_stats(run, ecfg)
     fs = ecfg["foot_skating"]
     foot_idx = [run.skel.names.index(n) for n in fs["joints"]]
-    out_dir = resolve_path((args.out or ecfg["out_dir"]).format(run=run.name))
+    out_dir = resolve_path((args.out or ecfg["out_dir"]).format(run=det.name if det else run.name))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     rows = []
@@ -278,7 +312,7 @@ def main() -> None:
                 continue
             tic = time.time()
             res, bs = eval_with_retry(run, ds, trans, methods, batch_size, mean, std, foot_idx,
-                                      float(fs["height_threshold_cm"]))
+                                      float(fs["height_threshold_cm"]), det=det)
             label = train_range_label(trans, run.train_range)
             msg = []
             for m in methods:
@@ -300,7 +334,7 @@ def main() -> None:
         w.writeheader()
         w.writerows(rows)
     png_path = out_dir / "metrics_by_length.png"
-    plot_lengths(rows, run.train_range, png_path, run.name)
+    plot_lengths(rows, run.train_range, png_path, f"{run.name} + {det.name}" if det else run.name)
     with open(out_dir / "run_info.json", "w", encoding="utf-8") as f:
         json.dump({**info, "lengths": lengths, "sets": args.sets, "methods": methods,
                    "batch_size": batch_size, "foot_skating": fs, "bench_stats": ecfg["bench_stats"],

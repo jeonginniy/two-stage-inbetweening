@@ -10,10 +10,10 @@ Current goal (professor meeting feedback, branch `viz-update`): find how far the
 
 Status (2026-11):
 - Context Transformer trained: 500k iterations, `experiments/ctx_base/` (`best.pth` = iteration 338000, `last.pth`, `log.csv`, `config.yaml`). Never overwrite anything in `experiments/`; checkpoint compatibility and training code must stay untouched.
-- Detail Transformer (stage 3): **not implemented**. Evaluate Context only.
+- Detail Transformer (stage 3) on branch `detail-transformer`: model/inputs/losses (`src/models/detail_transformer.py`, `src/training/detail.py`), `scripts/train_detail.py` (frozen context = `ctx_base/best.pth`). Trained 500k: `experiments/det_base/` (`best.pth` = iteration 498000; log `det_base.out` — leave uncommitted). Result: two-stage beats context-only on every official length and cuts foot skating 32–41%, but the L2P gain is much smaller than README (trans 30: 1.0117 vs README 0.8948); beyond trans 60 Detail no longer helps (assumptions G15, G16). Continued training `experiments/det_cont/` (resumed from det_base/last.pth to 1M, `best.pth` = iteration 978000; log `det_cont.out` — leave uncommitted): trans 30 L2P 0.9909, still ~11% worse than README, so training length is not the main cause (G18). Eval: `eval_lengths.py` methods `detail`/`detail_post`, `render_samples.py --stage detail`; `inference.load_detail` refuses a Detail trained on a different context checkpoint.
 - Stage 4 on `viz-update`: segment-colored GT|PRED videos (`scripts/render_samples.py`), L2P/L2Q/NPSS/foot-skating by transition length (`scripts/eval_lengths.py`). Metric implementation verified: interp/zero-velocity baselines match the official README to 4 decimals; Context-only matches README within ~1–5%.
 - Finding: beyond the training range (trans > 30) the model fails to reach the target; the official post-processing approximation (eq. 23) then splits the gap into jumps at both transition boundaries (assumptions F6).
-- `configs/env/lab.yaml` (local paths) and `ctx_base.out` are intentionally uncommitted — leave them out of commits. Push only after the user confirms.
+- `configs/env/lab.yaml` (local paths) `ctx_base.out` and `det_base.out` are intentionally uncommitted — leave them out of commits. Push only after the user confirms.
 
 ## Project
 
@@ -29,7 +29,7 @@ Run everything from the project root (`pytest.ini` sets `pythonpath = .`; script
 
 ```bash
 source .venv/bin/activate
-pytest                                         # all data-free tests (lab tests auto-skip); expected 65 passed, 4 skipped
+pytest                                         # all data-free tests (lab tests auto-skip); expected 90 passed, 4 skipped
 pytest tests/test_context_model.py -k mask -v  # single test file / test
 TSI_ENV=lab pytest -m lab -v                   # tests needing real LaFAN1 (tests/test_lafan1_real.py)
 ```

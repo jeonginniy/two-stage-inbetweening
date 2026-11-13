@@ -10,7 +10,7 @@
 |---|---|---|
 | 1 | 데이터 파이프라인: BVH 읽기 → 모델 입력 표현 → 원래 형태로 복원 | ✅ 완료 (연구실 실제 LaFAN1 검증 통과) |
 | **2** | **Context Transformer 구현 + 학습** | ✅ 구현·가짜 데이터 테스트 완료 / 🔬 실제 학습은 연구실 |
-| 3 | Detail Transformer 구현 + 학습 | 예정 |
+| 3 | Detail Transformer 구현 + 학습 | ✅ 브랜치 `detail-transformer`: 구현·학습 완료 (500k, `experiments/det_base/best.pth` = iteration 498000). 결과는 아래 "3단계 결과" |
 | 4 | 평가 (공식 README 수치와 비교) + 시각화 | 🔨 브랜치 `viz-update`: 구간별 색 비교 영상 ✅, 길이별 L2P/L2Q/NPSS/발 미끄러짐 ✅ (Context only) |
 
 ### 1단계 결과 (연구실, 실제 LaFAN1)
@@ -54,6 +54,48 @@ Context Transformer 만 평가 (Detail Transformer 미구현). `best.pth` (itera
 - 결과 파일: `outputs/eval/ctx_base/metrics_by_length.{csv,png}`, 영상 `outputs/videos/trans_<길이>/`.
   해석 주의 (NPSS 길이 의존성, 발 미끄러짐 vs 이동량) 와 가정은 `docs/assumptions.md` F 절.
 
+### 3단계 결과 (브랜치 `detail-transformer`, Detail Transformer)
+
+고정된 Context (`ctx_base/best.pth`) 위에서 Detail 을 500k iteration 학습 (41 ms/it, VRAM 384 MB, 약 6시간).
+`det_base/best.pth` (iteration 498000) 로 평가. 두 단계 = Context + 후처리 → Detail (Detail 출력 후처리 없음, README 와 같은 조건).
+
+공식 벤치마크 2232 클립, L2P (L2Q / NPSS 는 `outputs/eval/det_base/metrics_by_length.csv`):
+
+| trans | Context 만 | 두 단계 | README 두 단계 | 발 미끄러짐 Context 만 → 두 단계 (cm/frame, GT 0.08) |
+|---|---|---|---|---|
+| 5 | 0.1289 | 0.1177 | 0.1049 | 0.177 → 0.143 |
+| 15 | 0.4650 | 0.4425 | 0.3943 | 0.315 → 0.186 |
+| 30 | 1.0368 | 1.0117 | 0.8948 | 0.476 → 0.301 |
+| 45 (밖) | 1.8874 | 1.8686 | 1.6777 | 0.909 → 0.620 |
+
+- 두 단계는 모든 공식 길이에서 Context 만보다 좋고, **발 미끄러짐은 32–41% 줄어든다**.
+- 하지만 L2P 개선 폭은 README 보다 작다 (trans 30: README −13.6%, 여기 −2.4% → 두 단계 결과가 README 보다 13% 나쁨).
+  Context 만은 README 와 일치하므로 차이는 Detail 쪽. 가설: Context 가 train 분할에서 훨씬 정확해서
+  (trans 30 위치 오차 train 3.7 cm vs val 6.4 cm) Detail 이 쉬운 입력으로만 학습됨 (docs/assumptions.md G15, 미확인).
+- 긴 길이 (long 평가셋) L2P: 30 → 1.019 (Context 만 1.044), 60 → 3.166 (3.163), 90 → 6.49 (6.31), 150 → 13.03 (12.48),
+  300 → 22.83 (21.80). **60 프레임부터는 Detail 이 위치를 고치지 못하고 90 부터는 약간 나빠진다.**
+  Context 가 target 에 도달하지 못하는 한계를 Detail 이 넘지 못한다.
+- 경계: trans 30 샘플 5개 경계 점프 ±0.8 cm. trans 90 에서는 Detail 출력 (후처리 없음) 의 끝 경계 점프가 커진다
+  (run1_subject5 4800: Context +후처리 시작/끝 +99/+97 cm → 두 단계 +76/+264 cm). G16.
+- 결과: `outputs/eval/det_base/`, `outputs/eval/det_base_long/`, 영상 `outputs/videos/two_stage/trans_{030,060,090}/`
+  (클립마다 Context 만 / det_base / det_cont + 위아래 비교 영상, 영상별 설명은 그 폴더 `README.md`)
+
+**이어서 학습 (det_cont, 500k → 1M iteration, `det_cont/best.pth` = iteration 978000)** — docs/assumptions.md G17, G18:
+
+| trans | Context 만 | det_base | det_cont | README 두 단계 | 발 미끄러짐 det_base → det_cont |
+|---|---|---|---|---|---|
+| 5 | 0.1289 | 0.1177 | 0.1136 | 0.1049 | 0.143 → 0.140 |
+| 15 | 0.4650 | 0.4425 | 0.4302 | 0.3943 | 0.186 → 0.179 |
+| 30 | 1.0368 | 1.0117 | 0.9909 | 0.8948 | 0.301 → 0.281 |
+| 45 (밖) | 1.8874 | 1.8686 | 1.8429 | 1.6777 | 0.620 → 0.555 |
+
+- 모든 공식 길이에서 det_base 보다 좋아졌지만 폭은 작다 (trans 30 Context 대비 −2.4% → −4.4%, README −13.6%).
+  val30 손실도 0.1171 → 0.1147 (2%) 만 줄었다. **학습 길이만으로는 README 와의 차이를 설명하기 어렵다.**
+- long 평가셋 L2P (det_cont): 60 → 3.130 (Context 만 3.163), 90 → 6.46 (6.31), 150 → 13.11 (12.48), 300 → 23.34 (21.80).
+  60 까지는 조금 나아졌고, 90 이상은 여전히 Context 만보다 나쁘다 (300 은 det_base 22.83 보다도 나쁨).
+- 결과: `outputs/eval/det_cont_official/`, `outputs/eval/det_cont_long/`. det_base 결과·영상 사본은
+  `outputs/archive/2026-11-13_ctx_base_det_base/`.
+
 ## 폴더 구조
 
 ```
@@ -66,6 +108,7 @@ two_stage_inbetweening/
 │   ├── env/lab.yaml             연구실: LaFAN1 경로(수정 필요), device cuda:0
 │   ├── data/lafan1.yaml         context_len, window/offset, 분할, 접촉 임계값
 │   ├── model/context.yaml       2단계: 모델 크기, batch size, 학습률, 손실 가중치
+│   ├── model/detail.yaml        3단계: Detail 모델, 고정할 Context, 손실 가중치 (발 접촉·미끄러짐)
 │   ├── eval/lengths.yaml        4단계: 평가 길이 목록, 평가셋, 체크포인트
 │   └── viz/video.yaml           4단계: 구간 색, 영상 구성, 샘플 수·seed, 출력 경로
 ├── assets/
@@ -97,7 +140,7 @@ two_stage_inbetweening/
 │   │   └── baselines.py           SLERP 보간, zero-velocity 기준선
 │   └── visualization/           4단계
 │       └── skeleton_video.py      구간별 색 GT | PRED 비교 영상
-├── scripts/                   실행 스크립트 (데모, 연구실 검증, 통계 계산, train_context.py)
+├── scripts/                   실행 스크립트 (데모, 연구실 검증, 통계 계산, train_context.py, train_detail.py)
 ├── tests/                     pytest 테스트 (+ 가짜 데이터 생성 도우미)
 └── docs/                      정리 노트
     ├── assumptions.md           가정/미확인 사항 ← 꼭 읽기
@@ -154,6 +197,7 @@ python scripts/check_bvh_roundtrip.py
 python scripts/compute_stats.py
 python scripts/compare_stats_with_official.py --official <공식repo>/tests/train_stats_context.pkl
 python scripts/train_context.py --run-name ctx_base          # 2단계 학습 (자세히: scripts/README.md)
+python scripts/train_detail.py --run-name det_base           # 3단계 학습 (고정된 Context 위에서)
 python scripts/render_samples.py --trans 30                  # 4단계 구간별 색 비교 영상 (seed 고정 5개) → outputs/videos/trans_30/
 python scripts/eval_lengths.py                               # 4단계 길이별 지표 → outputs/eval/ctx_base/ (자세히: scripts/README.md)
 ```
