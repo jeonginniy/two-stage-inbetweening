@@ -208,7 +208,9 @@ def render_clips(run, ds, idx: list[int], trans: int, vcfg: dict, style: VideoSt
               f"{'OK' if align_err[b] < 1e-3 else '경고: 정렬 변환이 다름!'}")
         tic = time.time()
         layout = render_comparison_video(path, gt_v, pred_v, segs, gt_full[b, tgt].cpu().numpy(),
-                                         run.skel.parents, head, style, title, info, err)
+                                         run.skel.parents, head, style, title, info, err,
+                                         pred_label="PRED (Context + Detail)" if det is not None
+                                         else "PRED (Context Transformer)")
         print(f"  저장: {path}  ({len(fidx)} 프레임 = {len(fidx) / fps:.1f}초, 배치 {layout}, "
               f"{time.time() - tic:.0f}초)")
         results.append({"seq": name, "start": frame0, "index": i, "trans": trans,

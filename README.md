@@ -77,8 +77,8 @@ Context Transformer 만 평가 (Detail Transformer 미구현). `best.pth` (itera
   Context 가 target 에 도달하지 못하는 한계를 Detail 이 넘지 못한다.
 - 경계: trans 30 샘플 5개 경계 점프 ±0.8 cm. trans 90 에서는 Detail 출력 (후처리 없음) 의 끝 경계 점프가 커진다
   (run1_subject5 4800: Context +후처리 시작/끝 +99/+97 cm → 두 단계 +76/+264 cm). G16.
-- 결과: `outputs/eval/det_base/`, `outputs/eval/det_base_long/`, 영상 `outputs/videos/two_stage/det_base/trans_{30,60,90}/`
-  (`trans_{30,60,90}/` 의 Context 만 영상과 같은 클립; det_cont 영상은 `two_stage/det_cont/`)
+- 결과: `outputs/eval/det_base/`, `outputs/eval/det_base_long/`, 영상 `outputs/videos/two_stage/trans_{030,060,090}/`
+  (클립마다 Context 만 / det_base / det_cont + 위아래 비교 영상, 영상별 설명은 그 폴더 `README.md`)
 
 **이어서 학습 (det_cont, 500k → 1M iteration, `det_cont/best.pth` = iteration 978000)** — docs/assumptions.md G17, G18:
 
