@@ -1,0 +1,65 @@
+# =============================================================================
+# 발 전용 In-betweening 모델 설정 (feat/foot-only)
+# -----------------------------------------------------------------------------
+# - 사용처: foot_only/ 의 모든 파일 (foot_only/data.py 의 load_foot_config 로 읽음)
+# - 목표: transition 구간에서 전신 대신 "발 관절 4개 위치 + 발 접촉 4채널" 만 예측
+# - 발 관절 4개와 접촉 순서 = assets/skeleton_lafan1.yaml 의 contact_joints
+#     [LeftFoot(3), LeftToe(4), RightFoot(7), RightToe(8)]
+# - 경로 규칙: 폴더는 configs/env/<env>.yaml 의 cache_dir 에서 온다. 여기에는 파일 이름만 적는다.
+# - 값의 출처:
+#     [ctx_base]  = Context Transformer (experiments/ctx_base) 와 같은 값 (비교를 위해 맞춤)
+#     [결정]      = 발 전용 모델에서 정한 값 (docs/assumptions.md H 절)
+# =============================================================================
+
+data:
+  # [결정 H3] 발 위치 출력의 z-score 통계 (train_stats 분할에서만 계산)
+  #   python foot_only/compute_foot_stats.py → <cache_dir>/stats/<foot_stats_file>
+  foot_stats_file: foot_only_stats.npz
+  # [ctx_base] 입력 (전신) 정규화 통계: scripts/compute_stats.py 가 만든 같은 파일
+  context_stats_file: lafan1_context_stats.npz
+  stats_split: train_stats     # [ctx_base] Subject 1–4, window 50, offset 20 (configs/data/lafan1.yaml)
+
+# 모델: Context Transformer 구조 그대로 (src/models/context_transformer.py), 입출력 차원만 다름 [결정 H1, H2]
+#   입력 = D + 12 + d_mask = 135 + 12 + 1 = 148,  출력 = 12 (발 위치) + 4 (접촉 logit) = 16
+#   (차원은 여기 적지 않고 스켈레톤 파일과 foot_only/data.py 에서 계산)
+model:
+  d_mask: 1              # [ctx_base]
+  n_layer: 6             # [ctx_base]
+  n_head: 8              # [ctx_base]
+  d_model: 512           # [ctx_base]
+  d_head: 64             # [ctx_base]
+  d_ff: 512              # [ctx_base]
+  d_encoder_h: 512       # [ctx_base]
+  d_decoder_h: 512       # [ctx_base]
+  dropout: 0.0           # [ctx_base]
+  attn_bias: false       # [ctx_base]
+  attn_scale: d_head     # [ctx_base] (assumptions E3)
+
+train:
+  batch_size: 32         # [ctx_base]
+  grad_accum_steps: 1    # [ctx_base]
+  amp: null              # [ctx_base] null | fp16 | bf16
+  base_lr: 0.0625        # [ctx_base] Noam: lr = base_lr × min(it·warmup^-1.5, it^-0.5)
+  warmup_iters: 8000     # [ctx_base]
+  adam_betas: [0.9, 0.999]   # [ctx_base]
+  weight_decay: 0.0      # [ctx_base]
+  grad_clip: null        # [ctx_base]
+  max_iters: 500000      # [ctx_base]
+  seed: 0                # [ctx_base]
+  # transition 길이는 configs/data/lafan1.yaml 의 min_trans 5 / max_trans 30 (ctx_base 와 같은 파일)
+  midway_targets_amount: 0.1   # [ctx_base] 학습 때만. 검증·평가에서는 제약 프레임 없음
+  midway_targets_p: 0.5        # [ctx_base]
+  log_interval: 100            # [ctx_base]
+  val_interval: 2000           # [ctx_base]
+  ckpt_interval: 5000          # [ctx_base]
+  val_trans: [5, 15, 30]       # [ctx_base] 마지막 값의 val{t}_loss 로 best 를 고른다 [결정 H6]
+  val_batch_size: 64           # [ctx_base]
+  val_split: val               # [ctx_base]
+
+# L = w_pos · L_pos + w_contact · L_contact  (transition 프레임만, 제약 프레임 포함) [결정 H7]
+#   L_pos     : 역정규화한 발 위치 (cm) 의 L1, 12 좌표 평균
+#   L_contact : 접촉 logit 4 의 BCE (BCEWithLogits). pos_weight 없음 (1차 버전)
+loss:
+  w_pos: 1.0
+  w_contact: 1.0
+  contact_pos_weight: null     # [결정 H7] null = 사용 안 함. 예) [2.4, 1.3, 2.5, 1.3] (비접촉/접촉 비율)
