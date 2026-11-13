@@ -28,18 +28,57 @@ transition 구간에서 전신 대신 **발 관절 4개 위치 + 발 접촉 4채
 | `check_data.py` | [실행] 데이터 검증 (shape, FK 일치, round-trip, 접촉 그래프 → `outputs/foot_only/check_data/`) |
 | `train_foot.py` | [실행] 학습 → `experiments/foot_only/{config.yaml, log.csv, last.pth, best.pth}` |
 
-## 실행 순서 (프로젝트 루트, `export TSI_ENV=lab`)
+## 실행 순서 (프로젝트 루트)
 
 ```bash
-python scripts/compute_stats.py              # 입력 통계 (ctx_base 와 같은 파일, 이미 있으면 생략)
-python foot_only/compute_foot_stats.py       # 발 위치 통계
-python foot_only/check_data.py               # (선택) 데이터 검증
-python foot_only/train_foot.py               # 학습 (약 3.5 시간)
-python foot_only/train_foot.py --resume last # 중단 후 이어서
+source .venv/bin/activate
+export TSI_ENV=lab                           # 또는 매 명령에 --env lab
 ```
 
-`experiments/foot_only/last.pth` 가 이미 있으면 `--resume` 없이는 시작하지 않는다 (덮어쓰기 방지).
-기존 실험 이름 (ctx_base, det_base, det_cont 등) 은 `--run-name` 으로 쓸 수 없다.
+**1. 데이터 준비** (한 번만, 결과는 `configs/env/lab.yaml` 의 `cache_dir` 아래 `stats/`)
+
+```bash
+python scripts/compute_stats.py              # 입력 (전신) 통계 lafan1_context_stats.npz. ctx_base 와 같은 파일, 이미 있으면 생략
+python foot_only/compute_foot_stats.py       # 발 위치 통계 foot_only_stats.npz (train_stats 분할, 약 1분)
+python foot_only/check_data.py               # (선택) 데이터 검증: FK 일치, round-trip, 접촉 라벨 → outputs/foot_only/check_data/
+```
+
+BVH 파싱 결과는 `data/cache/lafan1_parsed/` 에 캐시되어 있어 ctx_base 를 학습한 PC 면 다시 읽지 않는다.
+
+**2. 학습** (RTX 3070: 24 ms/it, VRAM 341 MB, 500k ≈ 3시간 20분)
+
+```bash
+nohup python foot_only/train_foot.py > foot_only.out 2>&1 &   # → experiments/foot_only/ (로그 foot_only.out 은 커밋하지 않음)
+python foot_only/train_foot.py --max-iters 1000 --run-name foot_check_1k   # (선택) 짧게 동작 확인
+python foot_only/train_foot.py --env laptop --fake-data --run-name foot_smoke --max-iters 20 --batch-size 8 \
+    --set model.n_layer=2 model.d_model=64 model.d_ff=64 model.d_encoder_h=64 model.d_decoder_h=64   # 데이터 없이 스모크 (끝나면 experiments/foot_smoke 삭제)
+```
+
+설정은 `configs/foot_only.yaml` 에서 읽고, `--batch-size`, `--max-iters`, `--set 절.키=값` 으로 덮어쓴다.
+실제로 쓴 설정은 `experiments/<run>/config.yaml` 에 저장된다 (`data` = 데이터셋 설정, `foot_data` = 발 전용 설정).
+
+**3. 이어서 학습** (중단됐을 때)
+
+```bash
+python foot_only/train_foot.py --resume last  # last.pth 의 모델·optimizer·iteration·best 값에서 계속
+```
+
+- `experiments/<run>/last.pth` 가 이미 있으면 `--resume` 없이는 시작하지 않는다 (덮어쓰기 방지).
+- 기존 실험 이름 (ctx_base, ctx_smoke, det_base, det_cont) 은 `--run-name` 으로 쓸 수 없다.
+- 학습 중에는 run 폴더에 쓰지 않는다. 중간 확인은 last.pth 를 복사해서, 최종 수치는 best.pth 로만.
+
+## 학습 결과 (`experiments/foot_only/`, best.pth = iteration 454000)
+
+val 분할 (560 클립, 제약 프레임·후처리 없음). 자세한 내용은 `docs/assumptions.md` H9.
+
+| trans | 발 L2 (cm) | 접촉 acc (출력) | 접촉 acc (위치 판정, 월드 좌표) | F1 발목 L / R | F1 발끝 L / R |
+|---|---|---|---|---|---|
+| 5 | 0.99 | 0.906 | 0.854 | 0.80 / 0.75 | 0.87 / 0.87 |
+| 15 | 2.70 | 0.894 | 0.848 | 0.78 / 0.73 | 0.84 / 0.84 |
+| 30 | 6.75 | 0.868 | 0.806 | 0.70 / 0.69 | 0.80 / 0.80 |
+
+- 발목 접촉 F1 은 50k 이후 0.68–0.70 에서 오르지 않는다 (발끝보다 ~0.1 낮음). pos_weight 재학습은 평가 뒤 결정.
+- 다음 평가 (ctx_base / Two-stage / SLERP 와 비교, 길이 5–90) 준비 메모: `docs/foot_only_eval_plan.md`.
 
 ## log.csv (iteration, epoch, kind, name, value)
 

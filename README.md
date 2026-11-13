@@ -12,6 +12,7 @@
 | **2** | **Context Transformer 구현 + 학습** | ✅ 구현·가짜 데이터 테스트 완료 / 🔬 실제 학습은 연구실 |
 | 3 | Detail Transformer 구현 + 학습 | ✅ 구현·학습 완료. 최종 = `experiments/det_cont/best.pth` (1M 까지 이어서 학습, iteration 978000; 500k 판은 `det_base`). 결과는 아래 "3단계 결과" |
 | 4 | 평가 (공식 README 수치와 비교) + 시각화 | 🔨 브랜치 `viz-update`: 구간별 색 비교 영상 ✅, 길이별 L2P/L2Q/NPSS/발 미끄러짐 ✅ (Context only) |
+| 발 | 발 전용 In-betweening (교수님 피드백: 발만 먼저 예측) | ✅ 학습 완료 (브랜치 `feat/foot-only`, `experiments/foot_only/best.pth` = iteration 454000) / ⏳ 평가·시각화는 다음 작업 |
 
 ### 1단계 결과 (연구실, 실제 LaFAN1)
 
@@ -96,6 +97,25 @@ Context Transformer 만 평가 (Detail Transformer 미구현). `best.pth` (itera
 - 결과: `outputs/eval/det_cont_official/`, `outputs/eval/det_cont_long/`. det_base 결과·영상 사본은
   `outputs/archive/2026-11-13_ctx_base_det_base/`.
 
+### 발 전용 모델 (브랜치 `feat/foot-only`)
+
+transition 구간에서 전신 대신 **발 4관절 (LeftFoot, LeftToe, RightFoot, RightToe) 위치 + 접촉 4채널**만 예측한다.
+Context Transformer 구조와 ctx_base 학습 설정을 그대로 쓰고 입출력만 바꿨다 (입력 148 = 전신 135 + 아는 프레임 발 위치 12 + 마스크,
+출력 16). 손실 = 발 위치 L1 (cm) + 접촉 BCE. 코드·실행 방법은 [foot_only/README.md](foot_only/README.md), 결정·가정은
+[docs/assumptions.md](docs/assumptions.md) H 절.
+
+500k 학습 (3시간 19분), best = iteration 454000. val 분할 (제약 프레임·후처리 없음):
+
+| trans | 발 L2 (cm) | 접촉 acc (출력) | 접촉 F1 발목 L / R | 접촉 F1 발끝 L / R |
+|---|---|---|---|---|
+| 5 | 0.99 | 0.906 | 0.80 / 0.75 | 0.87 / 0.87 |
+| 15 | 2.70 | 0.894 | 0.78 / 0.73 | 0.84 / 0.84 |
+| 30 | 6.75 | 0.868 | 0.70 / 0.69 | 0.80 / 0.80 |
+
+- 발목 접촉 F1 은 발끝보다 ~0.1 낮고 50k 이후 오르지 않는다 (H9).
+- ctx_base / Two-stage (det_cont) / SLERP 와의 비교 (공식·long 평가셋, 길이 5–90, 발 L2·관절/동작별 접촉 F1·발 미끄러짐) 는
+  다음 작업. 준비 메모: [docs/foot_only_eval_plan.md](docs/foot_only_eval_plan.md).
+
 ## 폴더 구조
 
 ```
@@ -140,12 +160,14 @@ two_stage_inbetweening/
 │   │   └── baselines.py           SLERP 보간, zero-velocity 기준선
 │   └── visualization/           4단계
 │       └── skeleton_video.py      구간별 색 GT | PRED 비교 영상
+├── foot_only/                 발 전용 모델 (데이터, 모델, 학습; configs/foot_only.yaml, README 참고)
 ├── scripts/                   실행 스크립트 (데모, 연구실 검증, 통계 계산, train_context.py, train_detail.py)
 ├── tests/                     pytest 테스트 (+ 가짜 데이터 생성 도우미)
 └── docs/                      정리 노트
     ├── assumptions.md           가정/미확인 사항 ← 꼭 읽기
     ├── data_representation.md   논문 3.2 정리
-    └── context_detail_connection.md  Context ↔ Detail 연결 정리
+    ├── context_detail_connection.md  Context ↔ Detail 연결 정리
+    └── foot_only_eval_plan.md   발 전용 모델 다음 평가 준비 메모
 ```
 
 각 폴더의 `README.md` 에 더 자세한 설명이 있다.
