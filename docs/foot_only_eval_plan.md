@@ -2,7 +2,7 @@
 
 브랜치 `feat/foot-only`. 학습은 끝났고 (`experiments/foot_only/best.pth` = iteration 454000), 이 문서는 평가를
 시작할 때 정한 결정·주의점이다. **평가는 구현·실행 완료**: `python foot_only/eval_foot.py` (설정 `configs/eval/foot_only.yaml`)
-→ `outputs/eval/foot_only/`, 결과 요약은 `docs/assumptions.md` H10. 시각화 (영상) 는 아직.
+→ `outputs/eval/foot_only/`, 결과 요약은 `docs/assumptions.md` H10. 영상: `python foot_only/render_feet.py` (설정 `configs/viz/foot_only.yaml`) → `outputs/videos/foot_only/`.
 가정 번호는 `docs/assumptions.md` H 절.
 
 ## 1. 비교 대상

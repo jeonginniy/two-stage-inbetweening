@@ -29,6 +29,7 @@ transition 구간에서 전신 대신 **발 관절 4개 위치 + 발 접촉 4채
 | `train_foot.py` | [실행] 학습 → `experiments/foot_only/{config.yaml, log.csv, last.pth, best.pth}` |
 | `evaluate.py` | 평가 계산: `load_foot_run`, `predict_feet` (방법별 발 위치), `FootMetricAccumulator` (발 L2, 접촉 F1, 발 미끄러짐) |
 | `eval_foot.py` | [실행] 평가 → `outputs/eval/foot_only/{metrics_long.csv, summary.csv, metrics.png, run_info.json}` |
+| `render_feet.py` | [실행] 영상 (발끝 궤적·높이·속도·접촉, GT / foot-only / Two-stage) → `outputs/videos/foot_only/<클립>/trans<길이>.mp4` |
 
 ## 실행 순서 (프로젝트 루트)
 
@@ -102,6 +103,20 @@ val 분할 (560 클립, 제약 프레임·후처리 없음). 자세한 내용은
 - 학습 범위 안에서는 발 위치·발 미끄러짐·접촉 모두 foot-only 가 가장 좋다 (trans 5 발 L2 만 Two-stage 0.96 < 1.00).
 - 학습 범위 밖 (60, 90) 에서는 모든 모델이 크게 틀리고 차이가 줄어든다.
 - 위치로 판정한 접촉 F1 이 출력보다 훨씬 낮다: 예측 발이 접촉 구간에서 멈춰 있지 못함 (recall 발끝 0.41).
+
+## 영상 (`python foot_only/render_feet.py`)
+
+설정 `configs/viz/foot_only.yaml` (클립 walk3 / run1 / obstacles1, 길이 30 / 90, 색, 출력 경로).
+전신 스켈레톤 대신 발이 땅에 제대로 서 있는지를 보는 화면: 왼쪽 = 위에서 본 발끝 궤적 (접촉 중이면 채운 점),
+오른쪽 = LeftToe 높이 (회색 띠 = GT 접촉) / 수평 속도 / 접촉 띠 (GT 라벨 / out / pos). 계산은 평가와 같은 `predict_feet`.
+
+| 클립 | 발 L2 (cm) foot-only / Two-stage | 발 미끄러짐 (cm/frame) | 보이는 것 |
+|---|---|---|---|
+| walk3 trans 30 | 2.6 / 3.2 | 0.37 / 0.64 | foot-only 는 딛은 발이 고정, Two-stage 는 2 cm 뜨고 미끄러짐 |
+| run1 trans 30 | 4.2 / 6.7 | 0.21 / 0.25 | 둘 다 발 딛는 타이밍을 따라감 |
+| obstacles1 trans 30 | 11.5 / 7.8 | 0.01 / 0.01 | 23 cm 장애물 위 발을 foot-only 는 7 cm 로 내림 (약점) |
+| walk3 trans 90 | 38.9 / 31.4 | 0.98 / 0.65 | 70 프레임 서 있는 구간에서 foot-only 발이 돌아다님 |
+| run1 trans 90 | 86.8 / 163.1 | 0.78 / 2.52 | 둘 다 target 에 못 감, Two-stage 발이 땅 아래 −18 cm |
 
 ## log.csv (iteration, epoch, kind, name, value)
 

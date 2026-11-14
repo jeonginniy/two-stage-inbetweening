@@ -1,0 +1,28 @@
+# =============================================================================
+# 발 전용 모델 영상 설정 (feat/foot-only)
+# -----------------------------------------------------------------------------
+# - 사용처: foot_only/render_feet.py (load_named_config("viz", "foot_only"))
+# - 체크포인트·평가셋은 configs/eval/lengths.yaml (ctx_base, det_cont, long 평가셋) 과
+#   configs/eval/foot_only.yaml (foot_ckpt) 를 그대로 쓴다.
+# - 값의 출처: [결정] = 이 영상에서 정한 값
+# =============================================================================
+
+# 대표 클립: long 평가셋의 "<BVH 이름>_<시작 프레임>" (기존 outputs/videos/by_clip/ 의 클립과 같은 이름) [결정]
+clips: [walk3_subject5_5360, run1_subject5_4800, obstacles1_subject5_4040]
+lengths: [30, 90]              # [결정] 학습 범위 끝 (30) 과 범위 밖 (90)
+
+methods: [foot_only, two_stage]   # GT 와 함께 그릴 방법 (evaluate.METHODS 의 이름)
+colors:
+  gt: "#222222"
+  foot_only: "#2ca02c"
+  two_stage: "#9467bd"
+segment_colors:                # configs/viz/video.yaml 과 같은 구간 색
+  context: "#1f77b4"
+  generated: "#ff7f0e"
+  target: "#d62728"
+plot_joint: LeftToe            # 높이·속도·접촉 그래프에 그릴 발 관절 (위에서 본 궤적은 발끝 2개 모두)
+target_hold_frames: 15         # target 프레임을 멈춰서 보여줄 프레임 수
+fps: 30
+dpi: 100
+figsize: [12.8, 7.2]
+out_path: outputs/videos/foot_only/{clip}/trans{trans:03d}.mp4

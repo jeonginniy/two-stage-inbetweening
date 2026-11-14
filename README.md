@@ -12,7 +12,7 @@
 | **2** | **Context Transformer 구현 + 학습** | ✅ 구현·가짜 데이터 테스트 완료 / 🔬 실제 학습은 연구실 |
 | 3 | Detail Transformer 구현 + 학습 | ✅ 구현·학습 완료. 최종 = `experiments/det_cont/best.pth` (1M 까지 이어서 학습, iteration 978000; 500k 판은 `det_base`). 결과는 아래 "3단계 결과" |
 | 4 | 평가 (공식 README 수치와 비교) + 시각화 | 🔨 브랜치 `viz-update`: 구간별 색 비교 영상 ✅, 길이별 L2P/L2Q/NPSS/발 미끄러짐 ✅ (Context only) |
-| 발 | 발 전용 In-betweening (교수님 피드백: 발만 먼저 예측) | ✅ 학습·평가 완료 (브랜치 `feat/foot-only`, `experiments/foot_only/best.pth` = iteration 454000, `outputs/eval/foot_only/`) / ⏳ 시각화 |
+| 발 | 발 전용 In-betweening (교수님 피드백: 발만 먼저 예측) | ✅ 학습·평가 완료 (브랜치 `feat/foot-only`, `experiments/foot_only/best.pth` = iteration 454000, `outputs/eval/foot_only/`), 발 영상 ✅ (`foot_only/render_feet.py`) |
 
 ### 1단계 결과 (연구실, 실제 LaFAN1)
 
@@ -127,6 +127,8 @@ Context Transformer 구조와 ctx_base 학습 설정을 그대로 쓰고 입출�
 
 - 발만 예측하면 발 위치·발 미끄러짐 모두 Two-stage 보다 좋다 (trans 30 발 미끄러짐 −32%). 접촉 출력 F1 도 0.768 vs 0.740.
 - 하지만 학습 범위 밖에서는 발 전용 모델도 같이 무너진다 (trans 90 발 L2 50 cm). 긴 구간 문제는 출력 차원을 줄여도 남는다.
+- 영상 (`python foot_only/render_feet.py` → `outputs/videos/foot_only/`): 학습 범위 안에서는 foot-only 가 딛은 발을 더 잘 고정하지만,
+  장애물 위처럼 높은 곳의 접촉은 땅 쪽으로 끌어내리고, trans 90 에서는 서 있는 발도 돌아다닌다 (클립별 설명 `foot_only/README.md`).
 - 결과: `outputs/eval/foot_only/`, 계획·결정: [docs/foot_only_eval_plan.md](docs/foot_only_eval_plan.md).
 
 ## 폴더 구조
@@ -173,7 +175,7 @@ two_stage_inbetweening/
 │   │   └── baselines.py           SLERP 보간, zero-velocity 기준선
 │   └── visualization/           4단계
 │       └── skeleton_video.py      구간별 색 GT | PRED 비교 영상
-├── foot_only/                 발 전용 모델 (데이터, 모델, 학습; configs/foot_only.yaml, README 참고)
+├── foot_only/                 발 전용 모델 (데이터, 모델, 학습, 평가, 영상; configs/foot_only.yaml, configs/{eval,viz}/foot_only.yaml, README 참고)
 ├── scripts/                   실행 스크립트 (데모, 연구실 검증, 통계 계산, train_context.py, train_detail.py)
 ├── tests/                     pytest 테스트 (+ 가짜 데이터 생성 도우미)
 └── docs/                      정리 노트
