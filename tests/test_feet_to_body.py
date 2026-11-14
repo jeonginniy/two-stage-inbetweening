@@ -214,3 +214,39 @@ def test_train_body_script_fake_data(tmp_path):
         assert r.returncode != 0 and "기존 실험 폴더" in (r.stdout + r.stderr)   # 기존 실험 폴더 보호
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
+
+
+# -----------------------------------------------------------------------------
+# 평가 (feet_to_body/evaluate.py)
+# -----------------------------------------------------------------------------
+def test_predict_bodies(fake):
+    """방법별 전신 예측: shape, transition 밖 = 정답, 정답 발 조건 = 정답 발, 예측한 발 조건은 transition 에서만 다름."""
+    from feet_to_body.evaluate import BodyRun, predict_bodies
+    from foot_only.evaluate import FootRun
+    from foot_only.model import build_foot_model
+    from src.evaluation.inference import LoadedRun
+    from src.models.context_transformer import build_context_transformer
+    data_cfg, skel, layout, ds, ctx_norm, foot_norm = fake
+    torch.manual_seed(0)
+    run = LoadedRun({}, data_cfg, {"num_workers": 0}, torch.device("cpu"), skel, layout, ctx_norm,
+                    build_context_transformer(TINY, layout).eval(), {}, Path("fake/ctx"))
+    foot = FootRun({}, build_foot_model(TINY, layout).eval(), ctx_norm, foot_norm,
+                   {"w_pos": 1.0, "w_contact": 1.0, "contact_pos_weight": None}, {}, Path("fake/foot"))
+    body = BodyRun({}, build_body_model(TINY, layout).eval(), ctx_norm, foot_norm, True, {}, Path("fake/body"))
+    methods = ["body_gt", "body_gt_post", "body_pred", "body_pred_post", "ctx_post", "ctx_nopost", "interp"]
+    batch = next(iter(DataLoader(ds, batch_size=6, shuffle=False)))
+    bp = predict_bodies(batch, 20, run, methods, body=body, foot=foot)
+    L = data_cfg["context_len"] + 22
+    s = bp.spec.seq_slice
+    assert set(bp.preds) == set(methods)
+    assert set(bp.cond_feet) == {"body_gt", "body_gt_post", "body_pred", "body_pred_post"}
+    for m, x in bp.preds.items():
+        assert x.shape == (6, L, layout.dim), m
+        if not m.endswith("_post") and m != "ctx_post":                       # 후처리는 target 다음 프레임도 바꿈
+            assert torch.allclose(x[:, :s.start], bp.pb.x_gt_raw[:, :s.start], atol=1e-4), m
+            assert torch.allclose(x[:, s.stop:], bp.pb.x_gt_raw[:, s.stop:], atol=1e-4), m
+    feet_gt = bp.pb.gpos_gt[:, :, skel.contact_joints].reshape(6, L, -1)
+    assert torch.allclose(bp.cond_feet["body_gt"], feet_gt)
+    d = (bp.cond_feet["body_pred"] - feet_gt).abs().amax(dim=(0, 2))          # (L,)
+    assert float(d[:s.start].max()) < 1e-3 and float(d[s.stop:].max()) < 1e-3 and float(d[s].max()) > 1e-2
+    assert not torch.allclose(bp.preds["body_gt"], bp.preds["body_pred"])     # 발 조건이 다르면 출력이 다름

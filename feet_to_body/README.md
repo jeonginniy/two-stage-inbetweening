@@ -28,6 +28,8 @@
 | `model.py` | `build_body_model` (ContextTransformer, 입력 152 → 출력 135) |
 | `train_utils.py` | `run_body_model`, `body_forward` (손실, 식 21), `body_foot_error`, `validate` |
 | `train_body.py` | [실행] 학습 → `experiments/feet_to_body/{config.yaml, log.csv, last.pth, best.pth}` |
+| `evaluate.py` | 평가 계산: `load_body_run`, `predicted_cond` (발 전용 모델 예측 → 발 조건), `predict_bodies` (방법별 전신) |
+| `eval_body.py` | [실행] 평가 → `outputs/eval/feet_to_body/{metrics.csv, metrics.png, run_info.json}` |
 
 설정: `configs/feet_to_body.yaml`. 배치 준비는 `foot_only/data.py` 의 `prepare_foot_batch` 를 import 해서 쓴다.
 
@@ -61,6 +63,42 @@ python feet_to_body/train_body.py --env laptop --fake-data --run-name body_smoke
   - `val{t}_gpos_l2_nopost`, `val{t}_foot_l2` (+ `_<관절>`): 출력 전신의 발 vs 조건으로 준 발 (cm)
 - best = `val30_loss` 최소 (ctx_base 와 같은 규칙).
 
-## 결과
+## 평가 (`python feet_to_body/eval_body.py`, 약 1분)
 
-학습 중 (2026-11-15 시작). 끝나면 여기와 docs/assumptions.md I 절에 기록한다.
+설정 `configs/eval/feet_to_body.yaml` + `configs/eval/lengths.yaml` + `configs/eval/foot_only.yaml` (foot_ckpt).
+지표는 기존 평가와 같은 함수 (L2P, L2Q, NPSS, 발 미끄러짐) + 전역 위치 L2, 출력 발 vs 정답 발, 출력 발 vs 준 발.
+결과: `outputs/eval/feet_to_body/{metrics.csv, metrics.png, run_info.json}`.
+
+방법: `body_gt` = 정답 발 조건 (상한), `body_pred` = 발 전용 모델이 예측한 발 조건 (학습 때 본 적 없는 입력, I4),
+`_post` = 후처리 (식 23) 포함.
+
+## 결과 (docs/assumptions.md I6, I7)
+
+학습: 500k 정상 종료 (4시간 52분), best = iteration 164000 (`val30_loss` 0.0654; ctx_base best 0.0885).
+
+L2P (공식 벤치마크 2232 클립 / long 평가셋 2151 클립). 발 → 몸은 후처리 없음 / 있음:
+
+| trans | 발→몸, 정답 발 | 발→몸, 예측한 발 | Context + 후처리 | Two-stage | SLERP |
+|---|---|---|---|---|---|
+| 5 | 0.360 / 0.140 | 0.368 / 0.149 | 0.129 | **0.114** | 0.373 |
+| 15 | 0.450 / **0.363** | 0.529 / 0.449 | 0.465 | 0.430 | 1.249 |
+| 30 | **0.650** / 0.645 | 0.975 / 0.954 | 1.037 | 0.991 | 2.316 |
+| 45 (밖) | 1.228 / **1.156** | 1.974 / 1.881 | 1.887 | 1.843 | 3.447 |
+| 60 (밖, long) | 2.907 / **2.716** | 3.889 / 3.669 | 3.163 | 3.130 | 4.790 |
+| 90 (밖, long) | 6.688 / **6.201** | 7.922 / 7.434 | 6.311 | 6.463 | 7.457 |
+
+trans 30 의 다른 지표 (후처리 없음; GT 발 미끄러짐 0.078):
+
+| 방법 | L2Q | NPSS | 발 미끄러짐 | 출력 발 vs 정답 발 (cm) | 출력 발 vs 준 발 (cm) |
+|---|---|---|---|---|---|
+| 발→몸, 정답 발 | **0.481** | **0.090** | **0.200** | **1.45** | 1.45 |
+| 발→몸, 예측한 발 | 0.581 | 0.116 | 0.276 | 7.19 | 1.42 |
+| Two-stage | 0.590 | 0.124 | 0.281 | 7.81 | - |
+| Context + 후처리 | 0.606 | 0.127 | 0.476 | 8.89 | - |
+
+- **상한은 크다**: 정답 발을 주면 trans 30 L2P 가 Two-stage 보다 34% 좋다 (0.650 vs 0.991).
+- **예측한 발로는 이득이 거의 없다**: trans 30 에서만 Two-stage 보다 조금 좋고 (0.954 vs 0.991), 5 / 15 / 45 는 나쁘다.
+  모델은 준 발을 잘 따르므로 (1.4 cm), 남은 오차는 발 전용 모델의 발 오차 (7 cm) 에서 온다.
+- **짧은 구간이 약하다**: trans 5 는 정답 발을 줘도 Context 보다 나쁘다. 짧은 구간은 500k 까지 계속 배우는 중인데
+  best (val30_loss 최소) 는 164k 에서 골라졌다 (I6). 참고로 last.pth 는 trans 5 가 0.122 (후처리) 로 좋아진다.
+- **학습 범위 밖은 정답 발을 줘도 무너진다**: trans 90 L2P 6.2 (Context 6.3), 출력 발이 준 발과 30 cm 다르다.
