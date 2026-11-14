@@ -1,0 +1,67 @@
+# =============================================================================
+# 발 → 몸 모델 설정 (브랜치 feat/feet-to-body, 코드 feet_to_body/)
+# -----------------------------------------------------------------------------
+# - 사용처: feet_to_body/ 의 모든 파일 (feet_to_body/data.py 의 load_body_config 로 읽음)
+# - 목표: transition 구간의 "발 4관절 위치 + 접촉" 을 조건으로 받아 전신을 예측한다.
+#         1차 실험은 정답 (GT) 발을 준다 = "발을 완벽히 알 때 전신이 얼마나 좋아지는가" 의 상한.
+# - 비교 기준: ctx_base (같은 구조·손실·학습 설정, 발 조건만 없음)
+# - 값의 출처:
+#     [ctx_base]  = Context Transformer (configs/model/context.yaml, experiments/ctx_base) 와 같은 값
+#     [foot_only] = 발 전용 모델 (configs/foot_only.yaml) 과 같은 값
+#     [결정]      = 이 실험에서 정한 값 (docs/assumptions.md I 절)
+# =============================================================================
+
+data:
+  foot_stats_file: foot_only_stats.npz          # [foot_only] 발 위치 z-score 통계 (foot_only/compute_foot_stats.py)
+  context_stats_file: lafan1_context_stats.npz  # [ctx_base] 전신 통계 (scripts/compute_stats.py)
+  stats_split: train_stats                      # [ctx_base]
+
+# 발 조건 [결정 I1, I2]
+#   모든 프레임에 [발 위치 12 (정렬 월드 좌표, z-score) | 접촉 4 (0/1)] = 16 차원을 넣는다.
+#   형식이 발 전용 모델의 출력 (위치 12 + 접촉 4) 과 같아서, 나중에 예측한 발을 그대로 넣을 수 있다.
+cond:
+  # true  = 어텐션에서 모든 프레임을 key 로 본다 (transition 프레임에도 발 정보가 있으므로)
+  # false = ctx_base 와 같이 context·제약·target 프레임만 key 로 본다 (논문 그림 5a)
+  attend_all: true       # [결정 I2]
+
+# 모델: Context Transformer 구조 그대로, 입력 차원만 다름
+#   입력 = D + 16 + d_mask = 135 + 16 + 1 = 152,  출력 = D = 135 (차원은 스켈레톤에서 계산)
+model:
+  d_mask: 1              # [ctx_base]
+  n_layer: 6             # [ctx_base]
+  n_head: 8              # [ctx_base]
+  d_model: 512           # [ctx_base]
+  d_head: 64             # [ctx_base]
+  d_ff: 512              # [ctx_base]
+  d_encoder_h: 512       # [ctx_base]
+  d_decoder_h: 512       # [ctx_base]
+  dropout: 0.0           # [ctx_base]
+  attn_bias: false       # [ctx_base]
+  attn_scale: d_head     # [ctx_base] (assumptions E3)
+
+train:
+  batch_size: 32         # [ctx_base]
+  grad_accum_steps: 1    # [ctx_base]
+  amp: null              # [ctx_base] null | fp16 | bf16
+  base_lr: 0.0625        # [ctx_base] Noam: lr = base_lr × min(it·warmup^-1.5, it^-0.5)
+  warmup_iters: 8000     # [ctx_base]
+  adam_betas: [0.9, 0.999]   # [ctx_base]
+  weight_decay: 0.0      # [ctx_base]
+  grad_clip: null        # [ctx_base]
+  max_iters: 500000      # [ctx_base] [결정 I4] 공정한 비교를 위해 같은 길이
+  seed: 0                # [ctx_base]
+  # transition 길이는 configs/data/lafan1.yaml 의 min_trans 5 / max_trans 30 (ctx_base 와 같은 파일)
+  midway_targets_amount: 0.1   # [ctx_base] 학습 때만
+  midway_targets_p: 0.5        # [ctx_base]
+  log_interval: 100            # [ctx_base]
+  val_interval: 2000           # [ctx_base]
+  ckpt_interval: 5000          # [ctx_base]
+  val_trans: [5, 15, 30]       # [ctx_base] 마지막 값의 val{t}_loss 로 best 를 고른다 (ctx_base 와 같은 규칙·같은 손실 식)
+  val_batch_size: 64           # [ctx_base]
+  val_split: val               # [ctx_base]
+
+# [논문 식 21] L = L_rot + α_pos·L_pos + α_smooth·L_smooth (모두 L1, transition 프레임만) — ctx_base 와 같음 [결정 I3]
+loss:
+  w_rot: 1.0             # [ctx_base]
+  w_pos: 0.01            # [ctx_base]
+  w_smooth: 0.005        # [ctx_base]
