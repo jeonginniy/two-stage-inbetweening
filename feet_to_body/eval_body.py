@@ -60,6 +60,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--sets", nargs="+", default=["official", "long"], choices=["official", "long"])
     ap.add_argument("--methods", nargs="+", default=None, choices=METHODS, help="기본: 설정 파일의 methods")
     ap.add_argument("--body-ckpt", default=None, help="기본: 설정 파일의 body_ckpt")
+    ap.add_argument("--foot-ckpt", default=None, help="발 전용 모델 (body_pred* 의 발). 기본: configs/eval/foot_only.yaml 의 foot_ckpt")
     ap.add_argument("--batch-size", type=int, default=None)
     ap.add_argument("--out", default=None, help="결과 폴더 (기본: 설정 파일의 out_dir)")
     return ap.parse_args()
@@ -166,7 +167,7 @@ def main() -> None:
         det = load_detail(ecfg["detail_ckpt"], ctx_run)
         info["detail"] = {"ckpt": str(det.ckpt_path), "iteration": int(det.ckpt["iteration"])}
     if any(m in methods for m in ("body_pred", "body_pred_post")):
-        foot = load_foot_run(fcfg["foot_ckpt"], ctx_run.layout, ctx_run.device)
+        foot = load_foot_run(args.foot_ckpt or fcfg["foot_ckpt"], ctx_run.layout, ctx_run.device)
         info["foot_only"] = {"ckpt": str(foot.ckpt_path), "iteration": int(foot.ckpt["iteration"])}
     if any(m in methods for m in BODY_METHODS):
         body = load_body_run(args.body_ckpt or bcfg["body_ckpt"], ctx_run.layout, ctx_run.device)

@@ -27,3 +27,14 @@ lengths:
 methods: [body_gt, body_gt_post, body_pred, body_pred_post, ctx_post, ctx_nopost, two_stage, interp]
 
 out_dir: outputs/eval/feet_to_body   # 프로젝트 루트 기준, git 제외
+
+# 발 오차 민감도 실험 (feet_to_body/eval_foot_mix.py, I11) [결정]
+#   발 조건 = (1 − α) × 정답 발 + α × 발 전용 모델이 예측한 발 (위치·접촉 모두). α = 0 정답, α = 1 예측 그대로
+foot_mix:
+  alphas: [0.0, 0.25, 0.5, 0.75, 1.0]
+  set: official
+  lengths: [5, 15, 30, 45]
+  body_ckpts:                    # 비교할 발 → 몸 체크포인트 (이름: 경로)
+    run1_gt_feet: experiments/feet_to_body/best.pth
+    run2_pred_feet: experiments/feet_to_body_pred/best.pth
+  out_dir: outputs/eval/feet_to_body_mix
