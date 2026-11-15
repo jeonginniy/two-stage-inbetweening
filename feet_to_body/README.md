@@ -114,4 +114,29 @@ trans 30 의 다른 지표 (후처리 없음; GT 발 미끄러짐 0.078):
 발 전용 모델 (고정) 의 예측을 발 조건으로 준다. 주의: 발 전용 모델은 학습 클립에서 발을 더 잘 맞혀서
 (trans 30: 3.96 cm vs val 6.75 cm) 학습 때 보는 발 오차가 평가 때보다 작다.
 
-학습 중 (2026-11-15 시작, `experiments/feet_to_body_pred/`). 끝나면 결과를 여기에 기록한다.
+학습 완료 (500k, `experiments/feet_to_body_pred/`): best.pth = iteration 152000 (val30_loss 0.0835),
+best_mean.pth = iteration 492000 (val 평균 loss 0.0576). 평가 (I10):
+
+```bash
+python feet_to_body/eval_body.py --body-ckpt experiments/feet_to_body_pred/best.pth --out outputs/eval/feet_to_body_pred
+python feet_to_body/eval_body.py --body-ckpt experiments/feet_to_body_pred/best_mean.pth --out outputs/eval/feet_to_body_pred_mean
+```
+
+L2P (예측한 발 조건 + 후처리, 공식 2232 클립 / 60, 90 은 long 평가셋):
+
+| trans | 1차 best (164k) | 2차 best (152k) | 2차 best_mean (492k) | Context + 후처리 | Two-stage |
+|---|---|---|---|---|---|
+| 5 | 0.149 | 0.164 | 0.136 | 0.129 | **0.114** |
+| 15 | 0.449 | 0.470 | 0.456 | 0.465 | **0.430** |
+| 30 | 0.954 | **0.942** | 0.957 | 1.037 | 0.991 |
+| 45 | 1.881 | 1.858 | 1.910 | 1.887 | **1.843** |
+| 60 | 3.669 | 3.496 | 3.475 | 3.163 | **3.130** |
+| 90 | 7.434 | 7.378 | 7.162 | **6.311** | 6.463 |
+
+- **예측한 발로 학습해도 거의 달라지지 않았다** (trans 30: 0.954 → 0.942, 약 1%). 기대한 "발 오차를 덜 믿는" 효과는 없었다:
+  trans 30 에서 출력 발이 준 발을 2.2 cm 이내로 따라가고 (1차 1.4 cm), 출력 발 오차 7.2 cm 는 준 발 오차 (6.9 cm) 와 같다.
+- "발 먼저" 가 Two-stage 보다 좋은 길이는 **trans 30 뿐** (L2P −5%, L2Q 0.571 vs 0.590, NPSS 0.119 vs 0.124).
+  trans 5, 15, 45 와 학습 범위 밖 (60, 90) 은 Two-stage 가 좋다.
+- 발 미끄러짐 (trans 30, 후처리 포함): 2차 0.324, 1차 0.298, Two-stage 0.281, Context 0.476. Two-stage 보다 좋지 않다.
+- best_mean.pth 는 짧은 구간을 고친다 (trans 5: 0.164 → 0.136) 대신 30 이상은 조금 나빠진다. 그래도 trans 5 는 Context (0.129) 보다 나쁘다.
+- 같은 2차 모델에 정답 발을 주면 trans 30 L2P 0.681 (1차 0.645): 상한과의 차이 (0.94 vs 0.68) 는 발 예측 오차에서 온다.

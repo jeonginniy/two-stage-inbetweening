@@ -12,7 +12,7 @@
 | **2** | **Context Transformer 구현 + 학습** | ✅ 구현·가짜 데이터 테스트 완료 / 🔬 실제 학습은 연구실 |
 | 3 | Detail Transformer 구현 + 학습 | ✅ 구현·학습 완료. 최종 = `experiments/det_cont/best.pth` (1M 까지 이어서 학습, iteration 978000; 500k 판은 `det_base`). 결과는 아래 "3단계 결과" |
 | 4 | 평가 (공식 README 수치와 비교) + 시각화 | 🔨 브랜치 `viz-update`: 구간별 색 비교 영상 ✅, 길이별 L2P/L2Q/NPSS/발 미끄러짐 ✅ (Context only) |
-| 발→몸 | 발 조건 전신 예측 (교수님 피드백 2단계: 발 → 몸). 1차 = 정답 발 조건 (상한) | ✅ 학습·평가 완료 (브랜치 `feat/feet-to-body`, `experiments/feet_to_body/best.pth` = iteration 164000). 정답 발: trans 30 L2P 0.650 (Two-stage 0.991), 예측한 발: 0.954. 결과 표는 [feet_to_body/README.md](feet_to_body/README.md). 2차 (예측한 발로 학습, `experiments/feet_to_body_pred/`) 학습 중 |
+| 발→몸 | 발 조건 전신 예측 (교수님 피드백 2단계: 발 → 몸). 1차 = 정답 발 조건 (상한) | ✅ 학습·평가 완료 (브랜치 `feat/feet-to-body`, `experiments/feet_to_body/best.pth` = iteration 164000). 정답 발: trans 30 L2P 0.650 (Two-stage 0.991), 예측한 발: 0.954. 결과 표는 [feet_to_body/README.md](feet_to_body/README.md). 2차 (예측한 발로 학습, `experiments/feet_to_body_pred/`, best = 152000) 완료: trans 30 L2P 0.942 로 1차 (0.954) 와 거의 같음. Two-stage 보다 좋은 길이는 trans 30 뿐 |
 | 발 | 발 전용 In-betweening (교수님 피드백: 발만 먼저 예측) | ✅ 학습·평가 완료 (브랜치 `feat/foot-only`, `experiments/foot_only/best.pth` = iteration 454000, `outputs/eval/foot_only/`), 발 영상 ✅ (`foot_only/render_feet.py`) |
 
 ### 1단계 결과 (연구실, 실제 LaFAN1)
