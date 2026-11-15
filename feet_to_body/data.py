@@ -38,11 +38,25 @@ from src.training.context_inputs import TransitionSpec, build_context_input, key
 COND_DIM = FOOT_DIM + N_FOOT            # 16 = 발 위치 12 + 접촉 4
 
 
+def _merge(base: dict, over: dict) -> dict:
+    """dict 를 깊게 합친다: over 의 값이 base 를 덮어쓴다 (dict 끼리는 안쪽까지 합침)."""
+    out = dict(base)
+    for k, v in over.items():
+        out[k] = _merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else v
+    return out
+
+
 def load_body_config(path: str | Path | None = None) -> dict[str, Any]:
-    """configs/feet_to_body.yaml (또는 주어진 yaml 경로) → dict."""
+    """configs/feet_to_body.yaml (또는 주어진 yaml 경로) → dict.
+
+    yaml 에 `base: <configs/ 안의 파일 이름>` 이 있으면 그 파일을 먼저 읽고, 이 파일의 값으로 덮어쓴다
+    (예: configs/feet_to_body_pred.yaml 은 바뀐 값만 적는다).
+    """
     p = resolve_path(path) if path else CONFIG_DIR / "feet_to_body.yaml"
     with open(p, encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    base = cfg.pop("base", None)
+    return _merge(load_body_config(CONFIG_DIR / base), cfg) if base else cfg
 
 
 def foot_condition(fb: FootBatch) -> Tensor:

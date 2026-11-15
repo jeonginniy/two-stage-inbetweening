@@ -111,13 +111,19 @@ def validate(
     loss_w: dict,
     attend_all: bool,
     device,
+    cond_fn=None,
 ) -> dict[str, float]:
-    """val 분할, transition 길이마다 (제약 프레임 없음, 정답 발 조건):
+    """val 분할, transition 길이마다 (제약 프레임 없음).
+
+    cond_fn(fb, spec) → (cond (B, L, 16), 조건 발 위치 (B, L, 12) cm). None 이면 정답 발 조건.
+    (예측한 발로 학습할 때는 feet_to_body.evaluate.predicted_cond 를 감싼 함수를 준다.)
 
     val{t}_loss / _rot / _pos / _smooth   학습과 같은 손실 (후처리 없음, 배치 평균) — ctx_base 로그와 같은 이름·식
     val{t}_gpos_l2                         전역 관절 위치 평균 L2 (cm), **후처리 (식 23) 포함** — ctx_base 로그와 같음
     val{t}_gpos_l2_nopost                  같은 값, 후처리 없음
-    val{t}_foot_l2, _foot_l2_<관절>        출력 전신의 발 vs 조건으로 준 발 (cm, 후처리 없음). 0 에 가까울수록 발을 따름
+    val{t}_foot_l2, _foot_l2_<관절>        출력 전신의 발 vs **정답 발** (cm, 후처리 없음)
+    val{t}_foot_follow                     출력 전신의 발 vs **조건으로 준 발** (cm). 정답 발 조건이면 foot_l2 와 같음
+    val{t}_cond_l2                         조건으로 준 발 vs 정답 발 (cm). 정답 발 조건이면 0
     클립은 ctx + trans + 2 프레임으로 자른다 (ctx_base 검증과 같음; 후처리가 target 다음 프레임을 씀).
     """
     ctx, wf = data_cfg["context_len"], data_cfg["forward_world_axis"]
@@ -133,8 +139,8 @@ def validate(
             cut = {k: (v[:, :L] if k in ("root_pos", "local_rot", "contacts") else v) for k, v in batch.items()}
             fb = prepare_foot_batch(cut, skel, ctx_norm, foot_norm, ctx, wf, device)
             spec = TransitionSpec(ctx, ctx + trans)
-            losses, y, gpos = body_forward(model, fb, foot_condition(fb), spec, skel, layout, ctx_norm, loss_w,
-                                           attend_all)
+            cond, cond_feet = cond_fn(fb, spec) if cond_fn is not None else (foot_condition(fb), fb.foot_raw)
+            losses, y, gpos = body_forward(model, fb, cond, spec, skel, layout, ctx_norm, loss_w, attend_all)
             for k, v in losses.items():
                 sums[f"val{trans}_{k}"] += float(v)
             s = spec.seq_slice
@@ -145,6 +151,10 @@ def validate(
             err = body_foot_error(gpos, fb.foot_raw, skel, s)                 # (B, n, 4)
             foot_sum[trans] += err.sum(dim=(0, 1)).double().cpu()
             foot_n[trans] += float(err.shape[0] * err.shape[1])
+            sums[f"val{trans}_foot_follow"] += float(body_foot_error(gpos, cond_feet, skel, s).mean())
+            B = cond_feet.shape[0]
+            sums[f"val{trans}_cond_l2"] += float(
+                (cond_feet[:, s] - fb.foot_raw[:, s]).reshape(B, -1, N_FOOT, 3).norm(dim=-1).mean())
     model.train()
 
     res = {k: v / max(n_batches, 1) for k, v in sums.items()}

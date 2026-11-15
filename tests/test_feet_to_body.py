@@ -186,6 +186,32 @@ def test_validate_keys(fake):
     assert m.training
 
 
+def test_config_base_merge():
+    """feet_to_body_pred.yaml = base (feet_to_body.yaml) + 바뀐 값만."""
+    from feet_to_body.data import load_body_config
+    base, pred = load_body_config(), load_body_config("configs/feet_to_body_pred.yaml")
+    assert base["cond"]["source"] == "gt" and pred["cond"]["source"] == "foot_model" and pred["cond"]["foot_ckpt"]
+    assert "base" not in pred and pred["cond"]["attend_all"] == base["cond"]["attend_all"]
+    assert pred["model"] == base["model"] and pred["train"] == base["train"] and pred["loss"] == base["loss"]
+
+
+def test_validate_with_predicted_condition(fake):
+    """cond_fn 으로 다른 발 조건을 주면 cond_l2 > 0, 정답 발 조건이면 cond_l2 = 0 이고 foot_follow = foot_l2."""
+    data_cfg, skel, layout, ds, ctx_norm, foot_norm = fake
+    m = build_body_model(TINY, layout)
+    loader = DataLoader(ds, batch_size=8)
+    res = validate(m, loader, [5], data_cfg, skel, layout, ctx_norm, foot_norm, LOSS_W, True, "cpu")
+    assert res["val5_cond_l2"] == 0 and res["val5_foot_follow"] == pytest.approx(res["val5_foot_l2"], rel=1e-4)
+
+    def shifted(fb, spec):                                                    # transition 의 발을 3 cm 옮긴 조건
+        feet = fb.foot_raw.clone()
+        feet[:, spec.seq_slice, 0] += 3.0
+        return torch.cat([foot_norm.normalize(feet), fb.contact], dim=-1), feet
+    res2 = validate(m, loader, [5], data_cfg, skel, layout, ctx_norm, foot_norm, LOSS_W, True, "cpu", shifted)
+    assert res2["val5_cond_l2"] == pytest.approx(3.0 / 4, rel=1e-3)           # 4관절 중 1관절만 3 cm
+    assert res2["val5_loss"] != res["val5_loss"]
+
+
 def test_train_body_script_fake_data(tmp_path):
     """가짜 BVH 로 학습 스크립트가 끝까지 돌고, 덮어쓰기 거부·resume 가 동작하는지 (값은 의미 없음)."""
     run_name = f"pytest_body_{tmp_path.name}"
@@ -209,9 +235,11 @@ def test_train_body_script_fake_data(tmp_path):
         r = subprocess.run(base + ["--max-iters", "9", "--resume", "last"], cwd=PROJECT_ROOT, capture_output=True,
                            text=True, timeout=600)
         assert r.returncode == 0 and "iteration 6" in r.stdout and "끝: iteration 9" in r.stdout, r.stdout + r.stderr
-        r = subprocess.run([*base[:2], "--env", "laptop", "--fake-data", "--run-name", "foot_only"], cwd=PROJECT_ROOT,
-                           capture_output=True, text=True, timeout=600)
-        assert r.returncode != 0 and "기존 실험 폴더" in (r.stdout + r.stderr)   # 기존 실험 폴더 보호
+        for name in ("foot_only", "feet_to_body"):                             # 기존 실험 폴더 보호
+            r = subprocess.run([*base[:2], "--env", "laptop", "--fake-data", "--run-name", name], cwd=PROJECT_ROOT,
+                               capture_output=True, text=True, timeout=600)
+            assert r.returncode != 0 and "기존 실험 폴더" in (r.stdout + r.stderr)
+        assert (run_dir / "best_mean.pth").exists() and "val_mean_loss" in (run_dir / "log.csv").read_text()
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
 

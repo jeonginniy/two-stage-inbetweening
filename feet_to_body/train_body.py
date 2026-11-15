@@ -6,13 +6,17 @@
 ----
 1. (한 번만) python scripts/compute_stats.py           → 전신 통계 (ctx_base 와 같은 파일, 이미 있으면 생략)
 2. (한 번만) python foot_only/compute_foot_stats.py    → 발 위치 통계 (발 전용 모델과 같은 파일, 이미 있으면 생략)
-3. python feet_to_body/train_body.py                    → experiments/feet_to_body/{config.yaml, log.csv, last.pth, best.pth}
-   이어서: python feet_to_body/train_body.py --resume last
+3. python feet_to_body/train_body.py --run-name <이름>   → experiments/<이름>/{config.yaml, log.csv, last.pth, best.pth, best_mean.pth}
+   이어서: 같은 명령 + --resume last
+   1차 (정답 발, 끝남)  : experiments/feet_to_body        (configs/feet_to_body.yaml)
+   2차 (예측한 발) [I8] : python feet_to_body/train_body.py --config configs/feet_to_body_pred.yaml --run-name feet_to_body_pred
 
 학습 설정·손실은 ctx_base 와 같다 (configs/feet_to_body.yaml, [ctx_base] 표기):
 batch 32, Noam (0.0625, warmup 8000), 500k iteration, train window 42, transition [5, 30] (배치마다 하나),
 제약 프레임 (0.1, 0.5) 은 학습 때만, 손실 = 논문 식 21. best = val trans 30 의 val30_loss 최소.
-다른 점은 입력에 모든 프레임의 정답 발 (위치 12 + 접촉 4) 이 들어가고 [결정 I1], 어텐션이 모든 프레임을 본다는 것 [결정 I2].
+다른 점은 입력에 모든 프레임의 발 조건 (위치 12 + 접촉 4) 이 들어가고 [결정 I1], 어텐션이 모든 프레임을 본다는 것 [결정 I2].
+발 조건은 cond.source 에 따라 정답 발 (gt) 또는 고정한 발 전용 모델의 예측 (foot_model) [결정 I8].
+best_mean.pth = 모든 val 길이의 손실 평균이 최소인 시점 (train.save_best_mean) [결정 I9].
 
 log.csv (iteration, epoch, kind, name, value):
     train : loss, rot, pos, smooth, lr                                (log_interval 마다, 구간 평균)
@@ -44,9 +48,11 @@ import yaml  # noqa: E402
 from torch.utils.data import DataLoader  # noqa: E402
 
 from feet_to_body.data import foot_condition, load_body_config  # noqa: E402
+from feet_to_body.evaluate import predicted_cond  # noqa: E402
 from feet_to_body.model import build_body_model  # noqa: E402
 from feet_to_body.train_utils import body_forward, validate  # noqa: E402
 from foot_only.data import FOOT_DIM, compute_foot_stats, prepare_foot_batch  # noqa: E402
+from foot_only.evaluate import load_foot_run  # noqa: E402
 from src.config import load_data_config, load_env_config, require_dir, resolve_device, resolve_path  # noqa: E402
 from src.data.dataset import LafanDataset  # noqa: E402
 from src.data.representation import FeatureLayout, ZScoreNormalizer  # noqa: E402
@@ -58,14 +64,14 @@ from src.training.utils import (  # noqa: E402
 )
 from train_context import apply_overrides, compute_fake_stats, make_fake_lafan  # noqa: E402
 
-PROTECTED_RUNS = ("ctx_base", "ctx_smoke", "det_base", "det_cont", "foot_only", "foot_check_1k")   # 기존 실험 폴더에는 절대 쓰지 않음
+PROTECTED_RUNS = ("ctx_base", "ctx_smoke", "det_base", "det_cont", "foot_only", "foot_check_1k", "feet_to_body")   # 기존 실험 폴더에는 절대 쓰지 않음
 
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--env", help="configs/env/<env>.yaml (없으면 TSI_ENV)")
     ap.add_argument("--config", default=None, help="설정 yaml (기본 configs/feet_to_body.yaml)")
-    ap.add_argument("--run-name", default="feet_to_body", help="결과 폴더 이름 (기본 feet_to_body → experiments/feet_to_body)")
+    ap.add_argument("--run-name", required=True, help="결과 폴더 이름 → experiments/<이름> (기존 실험 폴더 이름은 거부)")
     ap.add_argument("--resume", default=None, help="'last' / 'best' (run 폴더 안) 또는 체크포인트 경로")
     ap.add_argument("--batch-size", type=int, default=None, help="train.batch_size")
     ap.add_argument("--max-iters", type=int, default=None, help="train.max_iters")
@@ -87,6 +93,11 @@ def main() -> None:
     apply_overrides(cfg, args.set)
     tcfg, loss_w = cfg["train"], cfg["loss"]
     attend_all = bool(cfg["cond"]["attend_all"])
+    source = cfg["cond"].get("source", "gt")
+    if source not in ("gt", "foot_model"):
+        raise ValueError(f"cond.source 는 gt 또는 foot_model 이어야 합니다: {source}")
+    if source == "foot_model" and args.fake_data:
+        raise ValueError("--fake-data 에서는 cond.source=foot_model 을 쓸 수 없습니다 (발 전용 체크포인트가 필요).")
 
     device = resolve_device(env)
     num_workers = env["num_workers"] if args.num_workers is None else args.num_workers
@@ -151,6 +162,22 @@ def main() -> None:
         raise ValueError(f"train 클립 수({len(train_ds)})가 batch_size({tcfg['batch_size']})보다 적습니다.")
     val_trans = [t for t in tcfg.get("val_trans", [max_trans]) if ctx + t + 2 <= data_cfg["splits"][val_split]["window"]]
 
+    # ----- 발 조건 [결정 I8]: 정답 발, 또는 고정한 발 전용 모델의 예측 -----
+    foot_run = None
+    if source == "foot_model":
+        foot_run = load_foot_run(cfg["cond"]["foot_ckpt"], layout, device)     # eval 모드, 학습하지 않음
+        for name, a, b in (("전신", foot_run.ctx_norm, ctx_norm), ("발", foot_run.foot_norm, foot_norm)):
+            if not (torch.allclose(a.mean, b.mean) and torch.allclose(a.std, b.std)):
+                raise ValueError(f"발 전용 모델의 {name} 정규화 통계가 이 학습과 다릅니다.")
+        for prm in foot_run.model.parameters():
+            prm.requires_grad_(False)
+
+    def make_cond(fb, spec):
+        """(발 조건 (B, T, 16), 조건 발 위치 (B, T, 12) cm). foot_model 이면 transition 만 예측, 나머지는 정답."""
+        if foot_run is None:
+            return foot_condition(fb), fb.foot_raw
+        return predicted_cond(foot_run, fb, spec, layout)
+
     # ----- 모델·최적화 -----
     model = build_body_model(cfg["model"], layout).to(device)
     base_lr = float(tcfg["base_lr"])
@@ -163,7 +190,8 @@ def main() -> None:
     grad_clip = tcfg.get("grad_clip")
     max_iters = int(tcfg["max_iters"])
 
-    iteration, epoch, best_val = 0, 0, math.inf
+    iteration, epoch, best_val, best_mean = 0, 0, math.inf, math.inf
+    save_mean = bool(tcfg.get("save_best_mean", False))
     if args.resume:
         ckpt_path = run_dir / f"{args.resume}.pth" if args.resume in ("last", "best") else resolve_path(args.resume)
         ckpt = load_checkpoint(ckpt_path, map_location=device)
@@ -172,6 +200,8 @@ def main() -> None:
         if scaler is not None and ckpt.get("scaler"):
             scaler.load_state_dict(ckpt["scaler"])
         iteration, epoch, best_val = ckpt["iteration"], ckpt["epoch"], ckpt["best_val"]
+        if save_mean and (run_dir / "best_mean.pth").exists():                 # 평균 규칙의 지금까지 최솟값
+            best_mean = float(load_checkpoint(run_dir / "best_mean.pth", map_location="cpu")["best_val"])
         print(f"이어서 학습: {ckpt_path} (iteration {iteration}, best {best_val:.4f})")
 
     # data = 데이터셋 설정 (configs/data/lafan1.yaml), foot_data = configs/feet_to_body.yaml 의 data 절 (이름이 겹쳐서 분리)
@@ -184,7 +214,8 @@ def main() -> None:
     print(f"device={device}, amp={amp_dtype}, 입력 {model.d_in} → 출력 {model.d_out}, "
           f"파라미터 {count_parameters(model):,}")
     print(f"train 클립 {len(train_ds)} (window {window}), val 클립 {len(val_ds)} (trans {val_trans}), "
-          f"batch {tcfg['batch_size']} × accum {accum}, max_iters {max_iters}, loss {loss_w}, attend_all {attend_all}")
+          f"batch {tcfg['batch_size']} × accum {accum}, max_iters {max_iters}, loss {loss_w}, attend_all {attend_all}, "
+          f"발 조건 {source}" + (f" ({foot_run.ckpt_path}, iteration {foot_run.ckpt['iteration']})" if foot_run else ""))
     print(f"결과 폴더: {run_dir}")
 
     log_path = run_dir / "log.csv"
@@ -211,8 +242,8 @@ def main() -> None:
             spec = sample_transition(ctx, min_trans, max_trans, window, float(tcfg.get("midway_targets_amount", 0.0)),
                                      float(tcfg.get("midway_targets_p", 0.0)), rng)
             fb = prepare_foot_batch(batch, skel, ctx_norm, foot_norm, ctx, wf, device)
-            losses, _, _ = body_forward(model, fb, foot_condition(fb), spec, skel, layout, ctx_norm, loss_w,
-                                           attend_all, amp_dtype)
+            cond, _ = make_cond(fb, spec)
+            losses, _, _ = body_forward(model, fb, cond, spec, skel, layout, ctx_norm, loss_w, attend_all, amp_dtype)
             loss = losses["loss"] / accum
             if scaler is not None:
                 scaler.scale(loss).backward()
@@ -248,7 +279,7 @@ def main() -> None:
 
         if iteration % int(tcfg.get("val_interval", 2000)) == 0 or iteration == max_iters:
             res = validate(model, val_loader, val_trans, data_cfg, skel, layout, ctx_norm, foot_norm, loss_w, attend_all,
-                           device)
+                           device, make_cond)
             print("  [val] " + ", ".join(f"{k} {v:.4f}" for k, v in res.items()
                                          if k.endswith(("_loss", "_gpos_l2", "_foot_l2"))))
             for k, v in res.items():
@@ -259,6 +290,15 @@ def main() -> None:
                 best_val = res[key]
                 save_checkpoint(run_dir / "best.pth", model, optimizer, scaler, iteration, epoch, best_val, resolved)
                 print(f"  best 갱신 ({key} = {best_val:.4f}) → best.pth")
+            if save_mean and val_trans:                                        # [결정 I9] 모든 val 길이의 손실 평균
+                mean_loss = sum(res[f"val{t}_loss"] for t in val_trans) / len(val_trans)
+                log.writerow([iteration, epoch, "val", "val_mean_loss", f"{mean_loss:.6g}"])
+                log_file.flush()
+                if mean_loss < best_mean:
+                    best_mean = mean_loss
+                    save_checkpoint(run_dir / "best_mean.pth", model, optimizer, scaler, iteration, epoch, best_mean,
+                                    resolved)
+                    print(f"  best_mean 갱신 (val 손실 평균 = {best_mean:.4f}) → best_mean.pth")
             t0 = time.time()
 
         if iteration % int(tcfg.get("ckpt_interval", 5000)) == 0 or iteration == max_iters:

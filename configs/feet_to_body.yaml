@@ -23,6 +23,11 @@ cond:
   # true  = 어텐션에서 모든 프레임을 key 로 본다 (transition 프레임에도 발 정보가 있으므로)
   # false = ctx_base 와 같이 context·제약·target 프레임만 key 로 본다 (논문 그림 5a)
   attend_all: true       # [결정 I2]
+  # 학습·검증 때 발 조건의 출처 [결정 I8]
+  #   gt         = 정답 발 (1차 실험, experiments/feet_to_body)
+  #   foot_model = 고정한 발 전용 모델 (foot_ckpt) 의 예측 (transition 만 예측, 나머지 프레임은 정답)
+  source: gt
+  foot_ckpt: null        # source 가 foot_model 일 때 쓰는 발 전용 체크포인트
 
 # 모델: Context Transformer 구조 그대로, 입력 차원만 다름
 #   입력 = D + 16 + d_mask = 135 + 16 + 1 = 152,  출력 = D = 135 (차원은 스켈레톤에서 계산)
@@ -59,6 +64,9 @@ train:
   val_trans: [5, 15, 30]       # [ctx_base] 마지막 값의 val{t}_loss 로 best 를 고른다 (ctx_base 와 같은 규칙·같은 손실 식)
   val_batch_size: 64           # [ctx_base]
   val_split: val               # [ctx_base]
+  # [결정 I9] true 이면 val_trans 전체의 val{t}_loss 평균이 최소일 때 best_mean.pth 도 저장한다
+  #   (best.pth 규칙은 그대로. 짧은 구간이 늦게 배워서 규칙 두 개를 비교하기 위함, I6)
+  save_best_mean: true
 
 # [논문 식 21] L = L_rot + α_pos·L_pos + α_smooth·L_smooth (모두 L1, transition 프레임만) — ctx_base 와 같음 [결정 I3]
 loss:

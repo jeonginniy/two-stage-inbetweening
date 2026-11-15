@@ -31,7 +31,7 @@
 | `evaluate.py` | 평가 계산: `load_body_run`, `predicted_cond` (발 전용 모델 예측 → 발 조건), `predict_bodies` (방법별 전신) |
 | `eval_body.py` | [실행] 평가 → `outputs/eval/feet_to_body/{metrics.csv, metrics.png, run_info.json}` |
 
-설정: `configs/feet_to_body.yaml`. 배치 준비는 `foot_only/data.py` 의 `prepare_foot_batch` 를 import 해서 쓴다.
+설정: `configs/feet_to_body.yaml` (1차, 정답 발), `configs/feet_to_body_pred.yaml` (2차, 예측한 발; base 파일에서 바뀐 값만 적음). 배치 준비는 `foot_only/data.py` 의 `prepare_foot_batch` 를 import 해서 쓴다.
 
 ## 실행 순서 (프로젝트 루트)
 
@@ -42,8 +42,12 @@ python scripts/compute_stats.py
 python foot_only/compute_foot_stats.py
 
 # 본 학습 (RTX 3070: 36 ms/iteration, VRAM 350 MB → 500k 약 5시간 + 검증)
-nohup python feet_to_body/train_body.py > feet_to_body.out 2>&1 &
-python feet_to_body/train_body.py --resume last          # 이어서
+# --run-name 은 필수. 끝난 실험 폴더 (feet_to_body 포함) 이름은 거부한다
+# 1차 (정답 발, 끝남): nohup python feet_to_body/train_body.py --run-name feet_to_body > feet_to_body.out 2>&1 &
+# 2차 (예측한 발 조건으로 학습, I8; 42 ms/iteration → 약 6시간)
+nohup python feet_to_body/train_body.py --config configs/feet_to_body_pred.yaml --run-name feet_to_body_pred \
+    > feet_to_body_pred.out 2>&1 &
+# 이어서: 같은 명령 + --resume last
 
 # 짧은 확인 (다른 폴더에)
 python feet_to_body/train_body.py --run-name body_check_1k --max-iters 1000 --set train.val_interval=1000
@@ -52,7 +56,7 @@ python feet_to_body/train_body.py --env laptop --fake-data --run-name body_smoke
     --set model.n_layer=2 model.d_model=64 model.d_ff=64 model.d_encoder_h=64 model.d_decoder_h=64
 ```
 
-`feet_to_body.out` (학습 로그) 은 커밋하지 않는다. 기존 실험 폴더 이름 (`ctx_base`, `det_*`, `foot_only` 등) 은 `--run-name` 으로 쓸 수 없다.
+`feet_to_body.out`, `feet_to_body_pred.out` (학습 로그) 은 커밋하지 않는다. 기존 실험 폴더 이름 (`ctx_base`, `det_*`, `foot_only` 등) 은 `--run-name` 으로 쓸 수 없다.
 
 ## log.csv (iteration, epoch, kind, name, value)
 
@@ -61,7 +65,8 @@ python feet_to_body/train_body.py --env laptop --fake-data --run-name body_smoke
   - `val{t}_loss/rot/pos/smooth` (후처리 없음), `val{t}_gpos_l2` (전역 관절 위치 L2 cm, 후처리 포함)
     → `experiments/ctx_base/log.csv` 의 같은 이름과 **같은 식·같은 val 분할** 이라 바로 비교할 수 있다.
   - `val{t}_gpos_l2_nopost`, `val{t}_foot_l2` (+ `_<관절>`): 출력 전신의 발 vs 조건으로 준 발 (cm)
-- best = `val30_loss` 최소 (ctx_base 와 같은 규칙).
+- `val{t}_foot_follow` (출력 발 vs 준 발), `val{t}_cond_l2` (준 발 vs 정답 발), `val_mean_loss` (val 손실 평균)
+- best.pth = `val30_loss` 최소 (ctx_base 와 같은 규칙). best_mean.pth = `val_mean_loss` 최소 (I9).
 
 ## 평가 (`python feet_to_body/eval_body.py`, 약 1분)
 
@@ -102,3 +107,11 @@ trans 30 의 다른 지표 (후처리 없음; GT 발 미끄러짐 0.078):
 - **짧은 구간이 약하다**: trans 5 는 정답 발을 줘도 Context 보다 나쁘다. 짧은 구간은 500k 까지 계속 배우는 중인데
   best (val30_loss 최소) 는 164k 에서 골라졌다 (I6). 참고로 last.pth 는 trans 5 가 0.122 (후처리) 로 좋아진다.
 - **학습 범위 밖은 정답 발을 줘도 무너진다**: trans 90 L2P 6.2 (Context 6.3), 출력 발이 준 발과 30 cm 다르다.
+
+## 2차 실험: 예측한 발로 학습 (I8, I9)
+
+1차 모델은 준 발을 그대로 따라서, 예측한 발의 오차 (7 cm) 가 전신 오차로 넘어갔다. 2차는 학습 때부터
+발 전용 모델 (고정) 의 예측을 발 조건으로 준다. 주의: 발 전용 모델은 학습 클립에서 발을 더 잘 맞혀서
+(trans 30: 3.96 cm vs val 6.75 cm) 학습 때 보는 발 오차가 평가 때보다 작다.
+
+학습 중 (2026-11-15 시작, `experiments/feet_to_body_pred/`). 끝나면 결과를 여기에 기록한다.

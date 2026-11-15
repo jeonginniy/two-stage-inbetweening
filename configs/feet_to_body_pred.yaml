@@ -1,0 +1,14 @@
+# =============================================================================
+# 발 → 몸 모델, 2차 실험: 발 전용 모델이 **예측한 발** 을 조건으로 학습 (feat/feet-to-body)
+# -----------------------------------------------------------------------------
+# - 사용: python feet_to_body/train_body.py --config configs/feet_to_body_pred.yaml --run-name feet_to_body_pred
+# - base 파일 (configs/feet_to_body.yaml) 의 값을 그대로 쓰고, 아래에 적은 값만 바꾼다
+#   (feet_to_body/data.py 의 load_body_config 가 합친다).
+# - 이유 [결정 I8]: 1차 실험은 정답 발로만 학습해서 예측한 발의 오차를 그대로 따른다 (I7).
+#   학습 때부터 예측한 발을 주면, 발이 틀릴 수 있다는 것을 모델이 배울 수 있다.
+# =============================================================================
+base: feet_to_body.yaml
+
+cond:
+  source: foot_model
+  foot_ckpt: experiments/foot_only/best.pth    # [결정] 발 전용 모델 best (iteration 454000, H9). 고정 (학습 안 함)
