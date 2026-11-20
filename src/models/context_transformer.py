@@ -40,6 +40,7 @@ class ContextTransformer(nn.Module):
     생성 인자:
         d_in, d_out : 입력/출력 차원. 보통 d_in = D + d_mask, d_out = D
         나머지      : configs/model/context.yaml 의 model 절과 같은 이름
+                      (pe_scale 은 설정에 없으면 1.0 = 예전 체크포인트와 같은 동작)
     """
 
     def __init__(
@@ -56,6 +57,7 @@ class ContextTransformer(nn.Module):
         dropout: float = 0.0,
         attn_bias: bool = False,
         attn_scale: str = "d_head",
+        pe_scale: float = 1.0,
     ):
         super().__init__()
         self.d_in, self.d_out = d_in, d_out
@@ -63,8 +65,9 @@ class ContextTransformer(nn.Module):
             nn.Linear(d_in, d_encoder_h), nn.PReLU(), nn.Dropout(dropout),
             nn.Linear(d_encoder_h, d_model), nn.PReLU(), nn.Dropout(dropout),
         )
-        self.keyframe_pe = KeyframePositionMLP(d_model, dropout)
-        self.rel_pe = RelativePositionMLP(d_head, dropout)
+        # pe_scale: 두 위치 인코딩에 넣는 거리 (프레임) 에 곱하는 값. 1.0 = 기존 (ctx_base), 1/30 = 초 단위 (J6)
+        self.keyframe_pe = KeyframePositionMLP(d_model, dropout, pe_scale)
+        self.rel_pe = RelativePositionMLP(d_head, dropout, pe_scale)
         self.attn_layers = nn.ModuleList(
             RelativeMultiHeadAttention(d_model, n_head, d_head, dropout, attn_bias, attn_scale)
             for _ in range(n_layer)

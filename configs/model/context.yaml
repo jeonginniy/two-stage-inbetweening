@@ -26,6 +26,9 @@ model:
   # 어텐션 점수 스케일. "d_head" → 1/sqrt(d_head) (표준 Transformer),
   # "d_model" → 1/sqrt(d_model) (공식 코드). [결정] E3
   attn_scale: d_head
+  # 위치 인코딩 (식 11–13) 에 넣는 거리 (프레임) 에 곱하는 값. 1.0 = 프레임 그대로 (공식 코드, ctx_base).
+  # 긴 transition 재학습 (ctx_long) 은 1/30 = 초 단위. [결정] J6
+  pe_scale: 1.0
 
 train:
   # ---- 배치/메모리 (RTX 3070 8GB 기준) ----
@@ -57,6 +60,15 @@ train:
   midway_targets_amount: 0.1   # [공식코드] transition 길이 × 0.1 번 뽑기 시도
   midway_targets_p: 0.5        # [공식코드] 각 시도가 제약 프레임을 만들 확률
 
+  # ---- 긴 transition 재학습 옵션 (docs/assumptions.md J 절). 아래 기본값 = 기존 (ctx_base) 동작 ----
+  # 실제 ctx_long 값은 scripts/README.md "2b" 명령의 --set 과 experiments/ctx_long/config.yaml 에 있다.
+  trans_dist: uniform          # [결정] J2. uniform (논문 3.6.1) | log_uniform (긴 범위에서도 짧은 길이를 충분히)
+  midway_none_p: 0.0           # [결정] J3. 이 확률로 제약 프레임 없는 배치 (평가는 항상 제약 없음)
+  midway_max: null             # [결정] J3. 제약 프레임 시도 횟수 상한 (null = 상한 없음 → trans 300 이면 30번)
+  postprocess_mode: mean       # [결정] J5. 검증·평가 후처리. mean = 식 23 (상수 δ) | ramp (양 끝 δ 를 선형으로)
+  loss_on_postprocess: false   # [결정] J13. true 면 학습 손실도 위 후처리를 거친 출력에서 계산 (평가와 같은 출력을 학습)
+  best_metric: last            # [결정] J7. last = val_trans 마지막 길이 손실 | mean = 모든 val 길이 손실 평균
+
   # ---- 기록/검증 ----
   log_interval: 100            # 학습 손실 출력 간격 (iteration)
   val_interval: 2000           # 검증 간격
@@ -70,3 +82,7 @@ loss:
   w_rot: 1.0             # [논문 식 21] / [공식코드] rw
   w_pos: 0.01            # [논문 식 21] / [공식코드] pw
   w_smooth: 0.005        # [논문 식 21] / [공식코드] sw
+  # [결정] J4. 긴 transition 재학습용 추가 항 (0 = 계산 안 함 = ctx_base 와 같음)
+  w_vel: 0.0             # 예측 속도 vs 정답 속도 L1 (cm/frame, 경계 포함). ctx_long: 0.02 (w_smooth 는 0)
+  w_foot: 0.0            # 정답 발 접촉 × 발 관절 속도 L1 (cm/frame). ctx_long: 0.1
+  w_skate: 0.0           # [결정] J12. 예측 발가락 높이 가중 (h < 3 cm, detach) × 발가락 수평 속도 (cm/frame)

@@ -21,6 +21,10 @@ scripts/render_samples.py (영상) 와 scripts/eval_lengths.py (길이별 지표
 generate 는 학습 중 검증 (scripts/train_context.py 의 validate → src.training.context.eval_transition) 과
 같은 순서를 따르고, 후처리 (논문 식 23) 를 켜고 끌 수 있게 한 것만 다르다.
 
+발 고정 후처리 (선택, docs/assumptions.md J9):
+    x_lock = foot_lock(x_raw, pb.offsets, run.skel, spec, **lock_cfg)   # 정규화 전 (B, L, D) → 같은 shape
+    예측에서 발가락이 땅에 닿은 구간을 찾아 그 동안 발가락 수평 위치를 고정하고, 다리를 2-뼈 IK 로 다시 맞춘다.
+
 transition 길이 제한
 --------------------
 모델 구조에는 최대 길이가 없다 (상대 위치 PE 식 12–13, Keyframe PE 식 11 모두 거리 "값" 을 MLP 에 넣음).
@@ -42,8 +46,8 @@ from torch.utils.data import default_collate
 
 from src.config import load_env_config, load_yaml, require_dir, resolve_device, resolve_path
 from src.data.dataset import LafanDataset
-from src.data.representation import FeatureLayout, ZScoreNormalizer
-from src.data.skeleton import Skeleton
+from src.data.representation import FeatureLayout, ZScoreNormalizer, decode_pose, encode_pose
+from src.data.skeleton import Skeleton, forward_kinematics, local_positions_from_root, rotation_between, two_bone_ik
 from src.models.context_transformer import build_context_transformer
 from src.training.context import PreparedBatch, global_positions, infer_context, prepare_batch
 from src.models.detail_transformer import build_detail_transformer
@@ -91,6 +95,11 @@ class LoadedRun:
     def name(self) -> str:
         """run 이름 = 체크포인트 폴더 이름 (예: ctx_base)."""
         return self.ckpt_path.parent.name
+
+    @property
+    def post_mode(self) -> str:
+        """후처리 방식 (학습 설정 train.postprocess_mode). 없으면 "mean" = 논문 식 23 (ctx_base). J5"""
+        return str(self.cfg.get("train", {}).get("postprocess_mode", "mean"))
 
 
 def load_run(ckpt: str | Path, config: str | Path | None = None, env_name: str | None = None,
@@ -269,7 +278,8 @@ def prepare_window(run: LoadedRun, batch: dict, trans: int) -> tuple[PreparedBat
 
 @torch.no_grad()
 def generate(run: LoadedRun, batch: dict, trans: int, use_postprocess: bool = True,
-             detail: "DetailRun | None" = None, det_postprocess: bool = False) -> Generation:
+             detail: "DetailRun | None" = None, det_postprocess: bool = False,
+             post_mode: str | None = None) -> Generation:
     """LafanDataset 배치 → transition `trans` 프레임 생성 (논문 3.3, 후처리 식 23).
 
     순서 (학습 중 검증 eval_transition 과 같음):
@@ -285,6 +295,7 @@ def generate(run: LoadedRun, batch: dict, trans: int, use_postprocess: bool = Tr
         detail : load_detail 결과. 주면 두 단계 (Context → Detail, 논문 3.4). 이때 Context 후처리는
                  Detail 학습 설정 (detail.ctx_postprocess) 을 따르고 use_postprocess 는 쓰지 않는다
         det_postprocess : Detail 출력에도 식 (23) 후처리 (기본 끔, 공식 README Detail 수치와 같음, G4)
+        post_mode : Context 후처리 방식 "mean" | "ramp". None 이면 run.post_mode (학습 설정, J5)
     출력:  Generation
     """
     pb, spec = prepare_window(run, batch, trans)
@@ -293,7 +304,8 @@ def generate(run: LoadedRun, batch: dict, trans: int, use_postprocess: bool = Tr
                                          ctx_postprocess=detail.ctx_postprocess, det_postprocess=det_postprocess)
         gpos = global_positions(run.norm.denormalize(y), pb.offsets, run.skel, run.layout)
         return Generation(pb, spec, y, gpos, y_ctx, prob)
-    y = infer_context(run.model, pb.x_gt, spec, run.layout, use_postprocess=use_postprocess)
+    y = infer_context(run.model, pb.x_gt, spec, run.layout, use_postprocess=use_postprocess,
+                      post_mode=post_mode or run.post_mode)
     gpos = global_positions(run.norm.denormalize(y), pb.offsets, run.skel, run.layout)
     return Generation(pb, spec, y, gpos)
 
@@ -321,6 +333,119 @@ def aligned_gt_with_before(run: LoadedRun, ds: LafanDataset, idx: Sequence[int],
     ext = default_collate(items)
     return prepare_batch(ext, run.skel, run.norm, before + run.ctx, run.data_cfg["forward_world_axis"],
                          run.device)
+
+
+# -----------------------------------------------------------------------------
+# 4) 발 고정 후처리 (선택, J9)
+# -----------------------------------------------------------------------------
+LEGS = (("LeftUpLeg", "LeftLeg", "LeftFoot", "LeftToe"), ("RightUpLeg", "RightLeg", "RightFoot", "RightToe"))
+
+
+def contact_segments(c: list[bool]) -> list[tuple[int, int]]:
+    """0/1 목록 → 1 이 이어진 구간 [(시작, 끝)] (끝 포함)."""
+    segs, start = [], None
+    for i, v in enumerate(c):
+        if v and start is None:
+            start = i
+        if not v and start is not None:
+            segs.append((start, i - 1))
+            start = None
+    if start is not None:
+        segs.append((start, len(c) - 1))
+    return segs
+
+
+def lock_targets(toe_xz: Tensor, contact: Tensor, s: int, e: int, blend: int) -> tuple[Tensor, Tensor]:
+    """발가락 하나의 고정 위치와 섞는 비율 (클립마다).
+
+    접촉 구간은 프레임 [s−1, e] 안에서 찾는다 (s−1 = 마지막 context, e = target; 둘 다 정답 프레임).
+      - 구간이 s−1 을 포함하면 그 프레임 (정답) 위치에, e 를 포함하면 target (정답) 위치에 고정 → 경계가 이어짐.
+        둘 다 포함하면 두 위치 사이를 선형으로.
+      - 아니면 구간 동안 예측 위치의 평균에 고정 (고치는 양이 가장 작음).
+    구간 안은 비율 w = 1, 구간 밖 blend 프레임 동안 w 를 1 → 0 으로 줄여 튀지 않게 한다.
+    [J9 고침] 정답 경계 프레임에 고정하지 않은 구간은 transition 양 끝에서도 w 가 0 부터 올라가야 한다
+    (w_t ≤ (t − s + 1)/(blend + 1),  w_t ≤ (e − t)/(blend + 1)). 이 제한이 없으면 transition 첫 프레임에서
+    시작하는 구간이 곧바로 평균 위치로 옮겨져 다리가 한 프레임에 수십 cm 튄다 (trans 150 다리 경계 점프 최대 44 cm/frame).
+    입력:  toe_xz (B, L, 2) 예측 발가락 수평 위치, contact (B, L) bool
+    출력:  (anchor (B, L, 2), w (B, L))   w 는 transition 프레임 [s, e) 밖에서 항상 0
+    """
+    B, L, _ = toe_xz.shape
+    anchor = toe_xz.clone()
+    w = torch.zeros(B, L, dtype=toe_xz.dtype, device=toe_xz.device)
+    c_cpu = contact.cpu()
+    for bi in range(B):
+        for a, z in contact_segments(c_cpu[bi, s - 1:e + 1].tolist()):
+            a, z = a + s - 1, z + s - 1                                   # 프레임 번호로
+            touch_s, touch_e = a == s - 1, z == e
+            if touch_s and touch_e:
+                t = torch.linspace(0, 1, z - a + 1, dtype=toe_xz.dtype, device=toe_xz.device)[:, None]
+                pos = (1 - t) * toe_xz[bi, a] + t * toe_xz[bi, z]
+            elif touch_s:
+                pos = toe_xz[bi, a].expand(z - a + 1, 2)
+            elif touch_e:
+                pos = toe_xz[bi, z].expand(z - a + 1, 2)
+            else:
+                pos = toe_xz[bi, a:z + 1].mean(0, keepdim=True).expand(z - a + 1, 2)
+            for t_ in range(max(a - blend, s), min(z + blend, e - 1) + 1):   # 구간 + 앞뒤 blend (transition 안만)
+                dist = max(a - t_, t_ - z, 0)
+                wk = 1.0 - dist / (blend + 1)
+                if not touch_s:
+                    wk = min(wk, (t_ - s + 1) / (blend + 1))
+                if not touch_e:
+                    wk = min(wk, (e - t_) / (blend + 1))
+                if wk > w[bi, t_]:
+                    anchor[bi, t_] = pos[min(max(t_, a), z) - a]
+                    w[bi, t_] = wk
+    return anchor, w
+
+
+@torch.no_grad()
+def foot_lock(x_raw: Tensor, offsets: Tensor, skel: Skeleton, spec: TransitionSpec,
+              height_cm: float = 3.0, speed_cm: float = 8.0, blend: int = 2) -> Tensor:
+    """발 고정 후처리 [결정 J9]: 예측 transition 의 발 미끄러짐을 IK 로 없앤다 (추론 때만, 학습 무관).
+
+    1) FK 로 발가락 (LeftToe, RightToe) 위치. 높이 < height_cm 이고 수평 속도 < speed_cm (cm/frame) 이면 "접촉"
+       (정답 발가락: 높이 3 cm 미만이 57%, 그때 속도 중앙값 0.03, 95% 분위 3.8 cm/frame; LaFAN1 Subject 1–4 실측.
+        기본 8 cm/frame [J14]: 정답에 거의 없는 4–8 cm/frame 의 낮은 발 = 끌림 → 고정, 더 빠르면 swing 으로 보고 둔다)
+    2) 접촉 구간마다 발가락 수평 위치를 하나로 고정 (lock_targets). 높이는 예측 그대로
+    3) 발 (Foot) 의 전역 회전은 그대로 두고 발목 목표 = 발가락 목표 − (예측 발가락 − 예측 발목)
+    4) 2-뼈 IK (two_bone_ik) 로 무릎·발목 위치 → 허벅지·정강이 전역 회전을 최소 회전으로 돌림
+       → 로컬 회전으로 되돌림 (UpLeg, Leg, Foot 세 관절만 바뀜. 루트·상체·뼈 길이는 그대로)
+    입력:  x_raw (B, L, D) 정규화 전 예측 (transition 밖은 정답), offsets (B, 1, J, 3), spec
+    출력:  같은 shape 의 새 텐서. 접촉이 없는 프레임은 입력과 같다
+    """
+    layout = FeatureLayout(skel.num_joints)
+    if layout.dim != x_raw.shape[-1]:
+        raise ValueError(f"x_raw 마지막 차원 {x_raw.shape[-1]} ≠ {layout.dim}")
+    root, rot = decode_pose(x_raw, layout)                                     # (B,L,3), (B,L,J,3,3)
+    grot, gpos = forward_kinematics(rot, local_positions_from_root(root, offsets), skel.parents)
+    s, e = spec.context_len, spec.target_idx
+    new_rot = rot.clone()
+    for names in LEGS:
+        hip, knee, ankle, toe = (skel.names.index(n) for n in names)
+        toe_p = gpos[..., toe, :]                                              # (B, L, 3)
+        speed = torch.zeros_like(toe_p[..., 0])
+        speed[:, 1:] = (toe_p[:, 1:, [0, 2]] - toe_p[:, :-1, [0, 2]]).norm(dim=-1)
+        contact = (toe_p[..., 1] < height_cm) & (speed < speed_cm)
+        anchor, w = lock_targets(toe_p[..., [0, 2]], contact, s, e, blend)
+        if not bool((w > 0).any()):
+            continue
+        toe_t = toe_p.clone()
+        toe_t[..., 0] = toe_p[..., 0] + w * (anchor[..., 0] - toe_p[..., 0])
+        toe_t[..., 2] = toe_p[..., 2] + w * (anchor[..., 1] - toe_p[..., 2])
+        ankle_t = toe_t - (toe_p - gpos[..., ankle, :])
+        knee_n, ankle_n = two_bone_ik(gpos[..., hip, :], gpos[..., knee, :], gpos[..., ankle, :], ankle_t)
+        r1 = rotation_between(gpos[..., knee, :] - gpos[..., hip, :], knee_n - gpos[..., hip, :])
+        up_n = r1 @ grot[..., hip, :, :]
+        shin = (r1 @ (gpos[..., ankle, :] - gpos[..., knee, :])[..., None])[..., 0]
+        leg_n = rotation_between(shin, ankle_n - knee_n) @ r1 @ grot[..., knee, :, :]
+        parent = grot[..., skel.parents[hip], :, :]
+        upd = {hip: parent.transpose(-1, -2) @ up_n, knee: up_n.transpose(-1, -2) @ leg_n,
+               ankle: leg_n.transpose(-1, -2) @ grot[..., ankle, :, :]}
+        m = (w > 0)[..., None, None]
+        for j, r in upd.items():
+            new_rot[..., j, :, :] = torch.where(m, r, rot[..., j, :, :])
+    return encode_pose(root, new_rot)
 
 
 def train_range_label(trans: int, train_range: tuple[int, int]) -> str:

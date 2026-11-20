@@ -133,7 +133,8 @@ def test_eval_one_length_detail_matches_generate(fake_runs):
     mean, std = torch.zeros(J * 3), torch.ones(J * 3)
     foot_idx = [run.skel.names.index("LeftToe"), run.skel.names.index("RightToe")]
     res = eval_one_length(run, ds, trans, ["model", "detail", "detail_post"], 8, mean, std, foot_idx, 3.0, det=det)
-    assert set(res) == {"model", "detail", "detail_post", "_gt_skate"}
+    assert set(res) == {"model", "detail", "detail_post", "_gt"}
+    assert set(res["_gt"]) == {"foot_skate", "jitter", "root_speed"}          # GT 기준값 (J8)
 
     def metrics_from(fn):
         acc = MetricAccumulator(mean, std, foot_idx, 3.0)
@@ -146,7 +147,7 @@ def test_eval_one_length_detail_matches_generate(fake_runs):
 
     ref = metrics_from(lambda b, pb, spec: generate(run, b, trans, detail=det).y)
     ref_post = metrics_from(lambda b, pb, spec: postprocess(generate(run, b, trans, detail=det).y, pb.x_gt, spec))
-    for k in ("L2P", "L2Q", "NPSS", "foot_skate"):
+    for k in ("L2P", "L2Q", "NPSS", "foot_skate", "boundary_jump", "jitter", "root_speed"):
         assert res["detail"][k] == pytest.approx(ref[k], rel=1e-4, abs=1e-6), k
         assert res["detail_post"][k] == pytest.approx(ref_post[k], rel=1e-4, abs=1e-6), k
     assert res["detail"]["n_clips"] == len(ds)

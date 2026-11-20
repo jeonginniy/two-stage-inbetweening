@@ -15,7 +15,7 @@
 | `render_compare.py` | 연구실 🔬 | 학습된 모델로 val 클립 transition 생성 → 원본(파랑)/생성(빨강)/SLERP(회색, `--slerp`) 겹친 30fps mp4. 클립별 gpos_l2 와 context 일치 여부 출력 |
 | `export_bvh.py` | 연구실 🔬 | 같은 클립을 원본/생성/SLERP BVH 로 저장 (LaFAN1 계층·offset, 월드 좌표 cm). 재읽기 FK 검증 출력 |
 | `render_samples.py` | 연구실 🔬 | **4단계** 샘플별 mp4: GT \| PRED, 구간 색 (BEFORE 회색 / CONTEXT 파랑 / GENERATED 주황 / TARGET 빨강), 프레임 번호·구간 이름·범례, 생성 구간 동안 target 포즈 반투명. → `outputs/videos/trans_<길이>/<시퀀스>_<시작프레임>.mp4` |
-| `eval_lengths.py` | 연구실 🔬 | **4단계** transition 길이별 L2P / L2Q / NPSS / 발 미끄러짐 (모델 ± 후처리, SLERP, zero-velocity), 공식 README 수치와 비교 → `outputs/eval/<run>/metrics_by_length.csv`, `.png`. `--render` 로 길이별 샘플 영상 |
+| `eval_lengths.py` | 연구실 🔬 | **4단계** transition 길이별 L2P / L2Q / NPSS / 발 미끄러짐 / 경계 점프 / 떨림 / 루트 속도 (모델 ± 후처리, 발 고정 IK, SLERP, zero-velocity), 공식 README 수치와 비교 → `outputs/eval/<run>/metrics_by_length.csv`, `.png`. `--render` 로 길이별 샘플 영상, `--post-mode` 로 후처리 방식 |
 | `blender_render.py` | 연구실 (Blender) | `blender --background --python ... -- <클립폴더>` 로 세 BVH 를 EEVEE mp4 렌더 |
 
 🔬 = 실제 LaFAN1 이 필요. 노트북에서 실행하면 "경로가 null" 메시지를 내고 종료한다 (정상).
@@ -82,6 +82,69 @@ tail -f ctx_base.out
   (모델·Adam 상태·iteration 을 복원. 학습률도 iteration 에 맞게 이어짐)
 - 길이: `train.max_iters` (기본 500,000). 논문에 학습 길이가 없어서 정한 값이다 (assumptions E15).
   val 손실이 더 이상 줄지 않으면 Ctrl+C 로 멈춰도 `best.pth` 가 남아 있다.
+
+### 2b. 긴 transition 재학습 (`ctx_long`, MotionBricks 참고, `docs/assumptions.md` J 절)
+
+목표: 긴 transition (최대 300 프레임 = 10 초) 에서도 target 에 정확히 도착하고, 발 미끄러짐·경계 점프 없이.
+새 파일 없이 기존 학습 스크립트에 설정 옵션만 추가했다 (설정에 없으면 ctx_base 와 같은 동작).
+
+```bash
+# 시험 학습 3개 (각 40k, batch 16 × accum 2 로 8GB 에 동시에): A = 범위·샘플링만, B = A + 위치 인코딩 초 단위, C = B + 손실
+COMMON="--env lab --batch-size 16 --grad-accum 2 --max-iters 40000 --set data.max_trans=300 \
+  data.splits.train.window=312 data.splits.val.window=312 train.trans_dist=log_uniform train.midway_none_p=0.5 \
+  train.midway_max=3 train.best_metric=mean train.val_trans=[5,15,30,60,90,150,300] train.val_interval=5000"
+python scripts/train_context.py --run-name pilot_a $COMMON
+python scripts/train_context.py --run-name pilot_b $COMMON model.pe_scale=0.0333333333
+python scripts/train_context.py --run-name pilot_c $COMMON model.pe_scale=0.0333333333 \
+  loss.w_smooth=0 loss.w_vel=0.02 loss.w_foot=0.1
+
+# 본 학습 = pilot_c 의 40k 를 experiments/ctx_long/ 에 복사해서 500k 까지 (batch 32 × 1, seed 1)
+mkdir experiments/ctx_long && cp experiments/pilot_c/{last.pth,best.pth,log.csv} experiments/ctx_long/
+python -u scripts/train_context.py --env lab --run-name ctx_long --resume last --batch-size 32 --grad-accum 1 \
+  --max-iters 500000 --set data.max_trans=300 data.splits.train.window=312 data.splits.val.window=312 \
+  train.trans_dist=log_uniform train.midway_none_p=0.5 train.midway_max=3 train.best_metric=mean \
+  "train.val_trans=[5,15,30,60,90,150,300]" train.val_interval=5000 model.pe_scale=0.0333333333 \
+  loss.w_smooth=0 loss.w_vel=0.02 loss.w_foot=0.1 train.postprocess_mode=ramp train.seed=1 \
+  > experiments/ctx_long/train.out 2>&1
+
+# ctx_long 은 160k 에서 멈춤 (J12·J13 없는 비교 기준). 시험 pp_skate = ctx_long 140k 에서 10k 동안
+# "후처리한 출력에서 손실 (J13) + L_skate 0.05 (J12)" → 같은 시점보다 발 미끄러짐 11–37% 감소, 정확도 비슷
+mkdir experiments/pp_skate
+python -u scripts/train_context.py --env lab --run-name pp_skate --resume <ctx_long 140k last.pth 복사본> \
+  --batch-size 16 --grad-accum 2 --max-iters 150000 --set <위 ctx_long 의 --set 전부> \
+  loss.w_skate=0.05 train.loss_on_postprocess=true train.seed=3 > experiments/pp_skate/train.out 2>&1
+
+# 최종 학습 ctx_long_pp = pp_skate 150k 에서 500k 까지 (batch 32 × 1). 손실 설정이 바뀌었으므로 --reset-best
+mkdir experiments/ctx_long_pp
+python -u scripts/train_context.py --env lab --run-name ctx_long_pp --resume <pp_skate 150k last.pth 복사본> \
+  --reset-best --batch-size 32 --grad-accum 1 --max-iters 500000 --set data.max_trans=300 \
+  data.splits.train.window=312 data.splits.val.window=312 train.trans_dist=log_uniform train.midway_none_p=0.5 \
+  train.midway_max=3 train.best_metric=mean "train.val_trans=[5,15,30,60,90,150,300]" train.val_interval=5000 \
+  model.pe_scale=0.0333333333 loss.w_smooth=0 loss.w_vel=0.02 loss.w_foot=0.1 loss.w_skate=0.05 \
+  train.postprocess_mode=ramp train.loss_on_postprocess=true train.seed=4 > experiments/ctx_long_pp/train.out 2>&1
+
+# 평가 (후처리 방식은 학습 설정 = ramp, *_lock = 발 고정 IK 후처리: 높이 < 3 cm, 속도 < 8 cm/frame, blend 2, J9·J9b·J14)
+python scripts/eval_lengths.py --ckpt experiments/ctx_long_pp/best.pth --methods model model_nopost model_lock interp
+# → outputs/eval/ctx_long_pp/ (best.pth = iteration 295000). 결과 표·쓰는 법 (≤ 30 은 Two-stage, ≥ 45 는 ctx_long_pp + 발 고정) 은 J 절 끝
+```
+
+| 옵션 | 뜻 | ctx_base | ctx_long |
+|---|---|---|---|
+| `data.max_trans`, `data.splits.{train,val}.window` | 학습 transition 범위 / 클립 길이 (J1) | 30 / 42, 65 | 300 / 312 |
+| `train.trans_dist` | 길이 분포 (J2) | uniform | log_uniform |
+| `train.midway_none_p`, `midway_max` | 제약 프레임 없는 배치 확률 / 시도 상한 (J3) | 0 / 없음 | 0.5 / 3 |
+| `loss.w_smooth`, `w_vel`, `w_foot` | 속도 크기 L1 / 정답 속도 L1 / 정답 접촉 × 발 속도 (J4) | 0.005 / 0 / 0 | 0 / 0.02 / 0.1 |
+| `train.postprocess_mode` | 후처리 (J5) | mean (식 23) | ramp |
+| `model.pe_scale` | 위치 인코딩 거리 배율 (J6) | 1 (프레임) | 1/30 (초) |
+| `train.best_metric` | best 기준 (J7) | last (val30) | mean (7개 길이 평균) |
+| `loss.w_skate` | 예측 발가락 높이 가중 × 수평 속도 (J12) | 0 | 0 (ctx_long_pp: 0.05) |
+| `train.loss_on_postprocess` | 학습·검증 손실을 후처리한 출력에서 (J13) | false | false (ctx_long_pp: true) |
+
+- 학습 중 val 로그에 `val{t}_foot_skate` (발 미끄러짐, 평가 지표 F4 와 같은 식) 와 GT 값 `*_gt` 가 추가됐다.
+- 학습 루프는 배치를 매번 `ctx + trans + 2` 프레임으로 잘라서 계산한다 (결과는 같고, window 312 에서 빠름).
+- `loss_on_postprocess` 로 학습한 모델은 후처리 없는 출력 (model_nopost) 이 나쁘다 (경계를 후처리가 맞춰 준다고 배우므로). 항상 후처리와 함께 쓴다.
+- 손실 설정을 바꿔 이어서 학습할 때는 `--reset-best` (val 손실 뜻이 달라져 이전 best 값과 비교할 수 없음).
+- 속도/메모리 (RTX 3070): batch 32 × 1 에서 69 ms/it, VRAM 최대 3.0 GB (window 312). ctx_long_pp: 53–65 ms/it, VRAM 최대 3.5 GB, 150k → 500k 약 6 시간. 시험 학습 3개 동시: 각 약 180 ms/it.
 
 ### 3. RTX 3070 (8GB) 에서 batch size / 메모리 조절
 
@@ -187,6 +250,8 @@ python scripts/render_samples.py --trans 90 --postprocess off   # 후처리 끔 
 python scripts/render_samples.py --n 10 --seed 1           # 샘플 수/seed 덮어쓰기
 python scripts/render_samples.py --index 1814              # 클립 직접 지정 (walk1_subject5, 프레임 1200)
 python scripts/render_samples.py --trans 30 --stage detail # 두 단계 (Context → Detail), 같은 샘플 → outputs/videos/trans_30_detail/
+# 긴 transition 재학습 모델 (J 절) + 발 고정 IK. --tag 로 폴더를 나눠 ctx_base 영상을 덮어쓰지 않게 → outputs/videos/trans_150_ctx_long_pp_lock/
+python scripts/render_samples.py --ckpt experiments/ctx_long_pp/best.pth --trans 150 --lock --tag ctx_long_pp_lock
 ```
 
 `--stage detail` 은 `trans_<길이>/` (Context 만) 와 같은 클립을 그려서 나란히 비교할 수 있다. 콘솔과 `samples.csv` 에
@@ -221,19 +286,22 @@ python scripts/eval_lengths.py --lengths 30 600 --sets long            # 설정�
 - 평가셋
   - `official`: 공식 벤치마크 (Subject 5, window 65, offset 40, 2232 클립). window 에 들어가는 trans ≤ 53 만 (5/15/30/45).
   - `long`: Subject 5, window 312 (= 10 + 300 + 2), offset 40, 2151 클립. **모든 길이에서 같은 시작 프레임** → 길이별 비교.
-- 방법: `model` (+후처리 식 23), `model_nopost`, `interp` (SLERP), `zerov`,
+- 방법: `model` (+후처리: 학습 설정의 `postprocess_mode`, 없으면 식 23; `--post-mode mean|ramp` 로 바꿈), `model_nopost`, `interp` (SLERP), `zerov`,
+  `model_lock` / `detail_lock` (발 고정 IK 후처리, `lengths.yaml` 의 `foot_lock`, J9),
   `detail` (두 단계: Context + 후처리 → Detail, Detail 출력 후처리 없음 = README Detail 수치와 같은 조건), `detail_post` (Detail 출력에도 후처리).
   `detail*` 는 `lengths.yaml` 의 `detail_ckpt` (기본 `experiments/det_cont/best.pth`, 최종 Two-stage) 가 있을 때만 계산하고, 없으면 건너뛴다.
   Detail 학습 때 고정한 Context 가 `ckpt` 와 다르면 시작하지 않는다. Detail 을 넣으면 결과 폴더는 `outputs/eval/<det run>/`.
   README Detail 비교: `python scripts/eval_lengths.py --sets official --lengths 5 15 30 45 --methods model detail`
 - 결과 (`outputs/eval/<run>/`)
   - `metrics_by_length.csv`: set, n_clips, trans, seconds, `train_range` (학습 범위 안/밖, 학습 범위 [5, 30]),
-    method, L2P, L2Q, NPSS, foot_skate (cm/frame), foot_skate_gt, readme_L2P/L2Q/NPSS (official 만), batch_size
+    method, L2P, L2Q, NPSS, foot_skate (cm/frame), foot_skate_gt, boundary_jump (경계 속도 점프 cm/frame, GT = 0),
+    jitter / jitter_gt (가속도 cm/frame²), root_speed / root_speed_gt (cm/frame), readme_L2P/L2Q/NPSS (official 만),
+    batch_size, post_mode
   - `metrics_by_length.png`: long 평가셋 길이 vs 지표 (x 로그, 학습 범위 음영, README 수치 ×)
   - `run_info.json`: 체크포인트, 설정, 시각
 - L2P 통계 (Subject 1–4, 평균 중심 정렬) 는 처음 한 번 계산해서 `data/cache/stats/bench_stats_rmi_*.npz` 에 캐시.
 - GPU 메모리가 부족하면 그 길이를 batch 절반으로 다시 계산하고 `← 줄임` 표시, CSV `batch_size` 에 실제 값.
-- 지표 정의와 가정: `docs/assumptions.md` F1–F4, F8, F9.
+- 지표 정의와 가정: `docs/assumptions.md` F1–F4, F8, F9, J8 (경계 점프·떨림·루트 속도), J9 (발 고정).
 
 ### 데이터 없이 동작만 확인 (노트북/이 환경)
 

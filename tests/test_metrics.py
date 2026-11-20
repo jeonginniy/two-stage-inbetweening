@@ -7,6 +7,7 @@
     - 쿼터니언 부호 뒤집힘 제거, NPSS 는 q → −q 에 불변
     - NPSS 손계산 (길이 2 신호) 과 비교
     - 발 미끄러짐: 정지 0, 바닥에서 미끄러지면 속도 그대로, H 이상 높이면 0
+    - 경계 점프 / 떨림 / 루트 속도 (J8): 정답이면 점프 0, 등속이면 떨림 0, 통째로 옮기면 점프 = 이동량
     - 평균 중심: 루트 XZ 평균 0, 높이 유지
     - 기준선: context·target 은 그대로, zero-velocity = 마지막 context 포즈, 보간은 양 끝 사이
 """
@@ -24,7 +25,10 @@ from src.data.rotations import axis_rotation, matrix_to_quat
 from src.evaluation.baselines import interpolation, slerp, zero_velocity
 from src.evaluation.metrics import (
     MetricAccumulator,
+    boundary_jump_per_clip,
     foot_skating_per_clip,
+    jitter_per_clip,
+    root_speed_per_clip,
     l2p_per_clip,
     l2q_per_clip,
     mean_center,
@@ -137,3 +141,22 @@ def test_baselines_keep_known_frames():
     q = slerp(matrix_to_quat(rot_x[:, a]), matrix_to_quat(rot_x[:, b]), w.view(1, 1, 1))
     q_y = matrix_to_quat(rot[:, a + 1])
     assert torch.allclose((q * q_y).sum(-1).abs(), torch.ones_like(q[..., 0]), atol=1e-8)
+
+
+def test_boundary_jump_jitter_root_speed():
+    t = torch.arange(T, dtype=torch.float64)[None, :, None, None]
+    vel = torch.tensor([2.0, 0.0, 1.0], dtype=torch.float64)
+    gt = (t * vel).expand(B, T, J, 3).clone()                        # 모든 관절 등속 직선
+    assert torch.allclose(boundary_jump_per_clip(gt, gt, FRAMES), torch.zeros(B, dtype=torch.float64))
+    assert torch.allclose(jitter_per_clip(gt, FRAMES), torch.zeros(B, dtype=torch.float64))
+    assert torch.allclose(root_speed_per_clip(gt, FRAMES), torch.full((B,), math.sqrt(5.0), dtype=torch.float64))
+    jumped = gt.clone()
+    jumped[:, FRAMES] += torch.tensor([0.0, 3.0, 4.0], dtype=torch.float64)   # transition 을 5 cm 옮김
+    # 시작 경계 +5, 끝 경계 −5 (크기 5) → 평균 5
+    assert torch.allclose(boundary_jump_per_clip(jumped, gt, FRAMES), torch.full((B,), 5.0, dtype=torch.float64))
+    assert (jitter_per_clip(jumped, FRAMES) > 0).all()
+    acc = MetricAccumulator(torch.zeros(J * 3), torch.ones(J * 3), foot_idx=[1, 2], height_cm=3.0)
+    q = remove_quat_discontinuities(random_quats(B, T, J))
+    acc.add(jumped, gt, q, q.clone(), FRAMES)
+    r = acc.result()
+    assert r["boundary_jump"] == pytest.approx(5.0) and r["root_speed"] > 0 and r["jitter"] > 0

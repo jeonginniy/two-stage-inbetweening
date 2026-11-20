@@ -14,6 +14,7 @@
 | 4 | 평가 (공식 README 수치와 비교) + 시각화 | 🔨 브랜치 `viz-update`: 구간별 색 비교 영상 ✅, 길이별 L2P/L2Q/NPSS/발 미끄러짐 ✅ (Context only) |
 | 발→몸 | 발 조건 전신 예측 (교수님 피드백 2단계: 발 → 몸). 1차 = 정답 발 조건 (상한) | ✅ 학습·평가 완료 (브랜치 `feat/feet-to-body`, `experiments/feet_to_body/best.pth` = iteration 164000). 정답 발: trans 30 L2P 0.650 (Two-stage 0.991), 예측한 발: 0.954. 결과 표는 [feet_to_body/README.md](feet_to_body/README.md). 2차 (예측한 발로 학습, `experiments/feet_to_body_pred/`, best = 152000) 완료: trans 30 L2P 0.942 로 1차 (0.954) 와 거의 같음. Two-stage 보다 좋은 길이는 trans 30 뿐. 발 오차 민감도 (trans 30: 발 오차 6.9 → 5.2 cm 면 L2P 0.84)·영상 (`outputs/videos/feet_to_body/`)·발 전용 모델 v2 ([foot_v2/README.md](foot_v2/README.md): 발 속도 손실, 발 L2 는 그대로 6.9 → 6.8 cm, 발 미끄러짐만 −7%) |
 | 발 | 발 전용 In-betweening (교수님 피드백: 발만 먼저 예측) | ✅ 학습·평가 완료 (브랜치 `feat/foot-only`, `experiments/foot_only/best.pth` = iteration 454000, `outputs/eval/foot_only/`), 발 영상 ✅ (`foot_only/render_feet.py`) |
+| 긴 구간 | 긴 transition 재학습 (MotionBricks 참고, 목표: 10 초까지 정확 + 발 미끄러짐·자세 무너짐 없음) | ✅ 학습·평가 완료 (`experiments/ctx_long_pp/best.pth` = iteration 295000, `outputs/eval/ctx_long_pp/`). trans 90 / 150 / 300 L2P 6.31 / 12.48 / 21.80 → 4.22 / 8.41 / 17.75, 경계 점프 75 → 0.75 cm/frame. 짧은 길이 (≤ 30) 는 7–16% 나빠서 Two-stage 를 쓴다. 아래 "긴 transition 재학습 결과", [docs/assumptions.md](docs/assumptions.md) J 절 |
 
 ### 1단계 결과 (연구실, 실제 LaFAN1)
 
@@ -131,6 +132,47 @@ Context Transformer 구조와 ctx_base 학습 설정을 그대로 쓰고 입출�
 - 영상 (`python foot_only/render_feet.py` → `outputs/videos/foot_only/`): 학습 범위 안에서는 foot-only 가 딛은 발을 더 잘 고정하지만,
   장애물 위처럼 높은 곳의 접촉은 땅 쪽으로 끌어내리고, trans 90 에서는 서 있는 발도 돌아다닌다 (클립별 설명 `foot_only/README.md`).
 - 결과: `outputs/eval/foot_only/`, 계획·결정: [docs/foot_only_eval_plan.md](docs/foot_only_eval_plan.md).
+
+### 긴 transition 재학습 결과 (MotionBricks 참고, docs/assumptions.md J 절)
+
+목표: (1) 긴 transition (최대 300 프레임 = 10 초) 에서도 정확한 예측, (2) 발 미끄러짐을 포함한 자세 무너짐이 없을 것.
+새 파일 없이 기존 코드에 옵션을 더했고 (설정에 없으면 ctx_base 와 같은 동작), 최종 모델 `experiments/ctx_long_pp/` 를 학습했다.
+
+| 찾은 문제 | 고친 것 (설정 키) |
+|---|---|
+| 학습 길이가 5–30 뿐이라 30 넘으면 외삽 | 학습 범위 5–300, 길이 분포 log-uniform (`data.max_trans`, `train.trans_dist`) — J1, J2 |
+| 후처리 (식 23, 상수 δ) 가 못 미친 거리를 경계에서 순간이동으로 메움 | 양 끝 어긋남을 선형으로 나누는 ramp 후처리 (`train.postprocess_mode`) — J5 |
+| 긴 구간은 거의 항상 제약 프레임이 생겨 평가 조건 (제약 없음) 과 다름 | 배치 50% 는 제약 없음, 시도 상한 3 (`train.midway_none_p`, `midway_max`) — J3 |
+| L_smooth 가 속도 자체를 0 쪽으로 당겨 덜 움직임 | 정답 속도와 비교하는 L_vel, 정답 접촉 × 발 속도 L_foot (`loss.w_vel`, `w_foot`) — J4 |
+| 위치 인코딩에 거리 (프레임) 를 그대로 넣어 ±311 에서 포화 | 초 단위로 줄임 (`model.pe_scale` 1/30) — J6 |
+| 후처리가 퍼뜨리는 루트 이동이 디딘 발을 미끄러뜨림 | 예측 발 높이 가중 미끄러짐 손실 L_skate + 후처리한 출력에서 손실 계산 (`loss.w_skate`, `train.loss_on_postprocess`) — J12, J13 |
+| (추론) 남은 발 미끄러짐 | 발 고정 2-뼈 IK 후처리 (`eval_lengths.py --methods model_lock`, `render_samples.py --lock`) — J9, J9b, J14 |
+
+long 평가셋 2151 클립 L2P (굵게 = 그 길이에서 가장 좋음):
+
+| trans (초) | ctx_base | Two-stage | **ctx_long_pp** | ctx_long_pp + 발 고정 | SLERP |
+|---|---|---|---|---|---|
+| 5 (0.17) | 0.130 | **0.114** | 0.150 | 0.155 | 0.376 |
+| 30 (1) | 1.044 | **0.998** | 1.114 | 1.156 | 2.339 |
+| 60 (2) | 3.163 | 3.130 | **2.482** | 2.653 | 4.790 |
+| 90 (3) | 6.311 | 6.463 | **4.222** | 4.480 | 7.457 |
+| 150 (5) | 12.48 | 13.11 | **8.407** | 8.705 | 12.26 |
+| 300 (10) | 21.80 | 23.34 | **17.75** | 18.00 | 20.23 |
+
+자세 무너짐 (long 평가셋, ctx_base → ctx_long_pp + 발 고정. GT: 발 미끄러짐 0.08, 경계 점프 0, 떨림 0.75):
+
+| trans | 발 미끄러짐 (cm/frame) | 경계 점프 (cm/frame) | 떨림 (cm/frame²) |
+|---|---|---|---|
+| 30 | 0.48 → 0.27 | 1.37 → 0.80 | 0.82 → 0.82 |
+| 90 | 1.44 → 0.33 | 10.5 → 0.93 | 1.54 → 0.61 |
+| 150 | 1.29 → 0.22 | 25.1 → 0.98 | 2.29 → 0.47 |
+| 300 | 0.48 → 0.10 | 75.2 → 1.02 | 1.93 → 0.31 |
+
+- 2–10 초에서 L2P 19–33% 좋아졌고 모든 길이에서 SLERP 보다 좋다 (ctx_base 는 5 초부터 SLERP 보다 나빴음). 경계 순간이동과 떨림 폭주가 없어졌다.
+- 쓰는 법: **≤ 30 프레임은 Two-stage, ≥ 45 프레임은 ctx_long_pp + 발 고정**. 한 모델로 짧은 길이까지 지키지는 못했다 (≤ 30 에서 L2P +7–16%).
+- 남은 한계: 10 초 동작은 실제보다 느리고 밋밋하다 (루트 속도 GT 의 64%, 떨림 GT 의 1/4 = 평균 동작). 결정적 회귀의 한계라
+  생성 모델이나 중간 keyframe 이 필요하다. 발 고정 없이는 미끄러짐이 GT 의 6–11 배 (trans ≥ 30).
+- 영상: `outputs/videos/trans_{90,150,300}_ctx_long_pp{,_lock}/` (ctx_base 영상 `trans_{90,150,300}/` 과 같은 클립).
 
 ## 폴더 구조
 

@@ -31,6 +31,8 @@
     python scripts/render_samples.py --n 10 --seed 1             # 설정 덮어쓰기
     python scripts/render_samples.py --index 1814                # 클립 직접 지정
     python scripts/render_samples.py --trans 30 --stage detail   # 두 단계 (Context → Detail) 같은 5개 샘플
+    # 긴 transition 재학습 모델 + 발 고정 IK (J9·J14). --tag 를 주면 폴더 이름 뒤에 붙어서 다른 영상을 덮어쓰지 않는다
+    python scripts/render_samples.py --ckpt experiments/ctx_long_pp/best.pth --trans 150 --lock --tag ctx_long_pp_lock
 """
 
 from __future__ import annotations
@@ -57,6 +59,7 @@ from src.evaluation.inference import (  # noqa: E402
     generate,
     load_detail,
     load_run,
+    foot_lock,
     max_trans_for_window,
     train_range_label,
 )
@@ -86,6 +89,10 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--eval-config", default="lengths", help="configs/eval/<이름>.yaml 또는 .yaml 경로")
     ap.add_argument("--postprocess", choices=["on", "off"], default=None,
                     help="후처리 (식 23) 켜기/끄기 (기본: video.yaml 의 postprocess)")
+    ap.add_argument("--lock", action="store_true",
+                    help="발 고정 IK 후처리 (configs/eval/lengths.yaml 의 foot_lock, J9·J14) 를 적용한 결과를 그림")
+    ap.add_argument("--tag", default=None,
+                    help="출력 폴더 이름 뒤에 붙일 말 (예: ctx_long_pp → trans_150_ctx_long_pp/). 다른 영상 덮어쓰기 방지")
     ap.add_argument("--env", default=None, help="configs/env/<env>.yaml (기본: 학습 config.yaml 의 env)")
     ap.add_argument("--device", default=None, help="예) cpu, cuda:0 (기본: env 설정)")
     return ap.parse_args()
@@ -129,11 +136,14 @@ def boundary_jumps(gpos: torch.Tensor, gpos_gt: torch.Tensor, ctx: int, target: 
 
 
 def render_clips(run, ds, idx: list[int], trans: int, vcfg: dict, style: VideoStyle,
-                 use_postprocess: bool = True, det=None) -> list[dict]:
+                 use_postprocess: bool = True, det=None, lock_cfg: dict | None = None,
+                 tag: str | None = None) -> list[dict]:
     """클립 번호 목록 → 영상 저장 + 검증 값 출력. 출력: 클립별 요약 dict 목록.
 
     det : load_detail 결과. 주면 두 단계 결과 (Context 후처리는 Detail 학습 설정, Detail 출력 후처리 없음) 를
           그리고 use_postprocess 는 쓰지 않는다. 같은 클립의 Context 만 결과 오차도 함께 출력한다.
+    lock_cfg : {height_cm, speed_cm, blend} 를 주면 생성 결과에 발 고정 IK (foot_lock, J9·J14) 를 적용해서 그린다
+    tag : 출력 폴더 이름 뒤에 "_tag" 를 붙인다 (예: trans_150 → trans_150_ctx_long_pp)
 
     좌표는 모두 학습용 정렬 좌표 (모델 창 마지막 context 프레임 기준 루트 XZ=0, +X 방향, cm).
     """
@@ -143,6 +153,9 @@ def render_clips(run, ds, idx: list[int], trans: int, vcfg: dict, style: VideoSt
 
     # 1) 생성 (모델 창)  gen.gpos, gen.pb.gpos_gt : (B, L, J, 3)
     gen = generate(run, collate(ds, idx), trans, use_postprocess=use_postprocess, detail=det)
+    if lock_cfg is not None:                                    # 발 고정 IK: 다리 3관절 로컬 회전만 바뀜
+        x_lock = foot_lock(run.norm.denormalize(gen.y), gen.pb.offsets, run.skel, gen.spec, **lock_cfg)
+        gen.gpos = global_positions(x_lock, gen.pb.offsets, run.skel, run.layout)
     ctx_gpos = None
     if det is not None:                                         # 비교용: Detail 입력이 된 Context 단계 결과
         ctx_gpos = global_positions(run.norm.denormalize(gen.y_ctx), gen.pb.offsets, run.skel, run.layout)
@@ -167,6 +180,8 @@ def render_clips(run, ds, idx: list[int], trans: int, vcfg: dict, style: VideoSt
     else:
         out_tmpl = vcfg["out_path"] if use_postprocess else vcfg["out_path_postprocess_off"]
         stage_txt = f"context only, post-proc {'on' if use_postprocess else 'off'}"
+    if lock_cfg is not None:
+        stage_txt += ", foot lock IK"
 
     results = []
     for b, i in enumerate(idx):
@@ -192,6 +207,8 @@ def render_clips(run, ds, idx: list[int], trans: int, vcfg: dict, style: VideoSt
                  f"{run.train_range[0]}-{run.train_range[1]})  |  transition mean err {l2:.2f} cm  |  "
                  f"{stage_txt}  |  {run.name}/{run.ckpt_path.name} it {run.ckpt['iteration']}")
         path = resolve_path(out_tmpl.format(trans=trans, seq=name, start=frame0))
+        if tag:
+            path = path.parent.with_name(f"{path.parent.name}_{tag}") / path.name
 
         print(f"\n[{b + 1}/{len(idx)}] {name} 모델 창 BVH 프레임 {frame0}–{frame0 + gen.spec.target_idx} "
               f"(long 평가셋 클립 #{i}), trans {trans} ({rng_label})")
@@ -216,6 +233,7 @@ def render_clips(run, ds, idx: list[int], trans: int, vcfg: dict, style: VideoSt
         results.append({"seq": name, "start": frame0, "index": i, "trans": trans,
                         "train_range": rng_label, "stage": "detail" if det is not None else "context",
                         "postprocess": use_postprocess if det is None else "ctx" if det.ctx_postprocess else "off",
+                        "foot_lock": lock_cfg is not None,
                         "gpos_l2": round(l2, 4),
                         "ctx_gpos_l2": round(ctx_l2, 4) if ctx_l2 is not None else "",
                         "jump_start_cm": round(float(jump_s[b]), 2), "jump_end_cm": round(float(jump_e[b]), 2),
@@ -252,7 +270,8 @@ def main() -> None:
         print(f"두 단계: Detail {det.ckpt_path} (iteration {det.ckpt['iteration']}). "
               f"--postprocess 는 쓰지 않음 (Context 후처리 {'켬' if det.ctx_postprocess else '끔'}, Detail 출력 후처리 없음)")
     with torch.no_grad():
-        results = render_clips(run, ds, idx, args.trans, vcfg, style, use_postprocess=pp, det=det)
+        results = render_clips(run, ds, idx, args.trans, vcfg, style, use_postprocess=pp, det=det,
+                               lock_cfg=dict(ecfg["foot_lock"]) if args.lock else None, tag=args.tag)
     manifest = Path(results[0]["path"]).parent / "samples.csv"
     write_manifest(results, manifest)
     print(f"\n{len(results)}개 평균 transition 오차 (trans {args.trans}): "

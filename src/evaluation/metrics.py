@@ -14,13 +14,18 @@
     NPSS : transition 구간 전역 쿼터니언의 시간축 파워 스펙트럼 → 누적분포의 EMD (차원별)
            → GT 전체 파워로 가중 평균. 가중치는 "데이터셋 전체" 에서 정규화한 뒤 합 (Gopalakrishnan et al. 2019)
     발 미끄러짐 (논문에 없음) : 발가락 높이 h < H 일 때 수평 속도 × (2 − 2^(h/H)), cm/frame
+    자세·연속성 지표 (논문에 없음, docs/assumptions.md J8) :
+        boundary_jump : 두 경계 (마지막 context → 첫 transition, 마지막 transition → target) 에서
+                        예측 속도와 정답 속도의 차이 (관절 평균 L2, cm/frame). 점프 (순간이동) 가 있으면 커짐. GT = 0
+        jitter        : transition 관절 가속도 크기 평균 (cm/frame²). 떨림. GT 값과 비교
+        root_speed    : transition 루트 수평 속도 평균 (cm/frame). "덜 움직여서" 미끄러짐이 줄어든 것 구별 (F10)
 
 쓰는 순서
 ---------
     mean, std = compute_bench_stats(...)          # 한 번 (캐시)
     acc = MetricAccumulator(mean, std, foot_idx, H)
     for 배치:  acc.add(gpos_pred, gpos_gt, gquat_pred, gquat_gt, spec.seq_slice)
-    acc.result() → {"L2P", "L2Q", "NPSS", "foot_skate", "n_clips"}
+    acc.result() → {"L2P", "L2Q", "NPSS", "foot_skate", "boundary_jump", "jitter", "root_speed", "n_clips"}
 
 shape 표기: B = 배치, T = 프레임, J = 관절 (22), 좌표 단위 cm.
 """
@@ -143,6 +148,43 @@ def foot_skating_per_clip(gpos: Tensor, foot_idx: Sequence[int], height_cm: floa
     return (v * w).mean(dim=(1, 2))
 
 
+def boundary_jump_per_clip(gpos_pred: Tensor, gpos_gt: Tensor, frames: slice) -> Tensor:
+    """경계 점프 (클립별, cm/frame) [결정 J8]. 두 경계 속도 오차의 평균.
+
+    시작: v_s = g_s − g_{s−1}, 끝: v_e = g_e − g_{e−1} (e = target 프레임). 예측과 정답의 속도 차이를
+    관절별 L2 → 관절 평균 → 두 경계 평균. transition 밖은 정답이라 경계 차이는 "생성한 첫/마지막 프레임" 이 결정한다.
+    입력:  gpos (B, T, J, 3), frames = transition 구간 [s, e)
+    출력:  (B,)
+    """
+    s, e = frames.start, frames.stop
+    out = []
+    for a, b in ((s - 1, s), (e - 1, e)):
+        d = (gpos_pred[:, b] - gpos_pred[:, a]) - (gpos_gt[:, b] - gpos_gt[:, a])   # (B, J, 3)
+        out.append(d.norm(dim=-1).mean(dim=-1))
+    return (out[0] + out[1]) / 2
+
+
+def jitter_per_clip(gpos: Tensor, frames: slice) -> Tensor:
+    """떨림 (클립별, cm/frame²) [결정 J8]. transition 프레임 t 의 가속도 |g_{t+1} − 2g_t + g_{t−1}|, 관절·프레임 평균.
+
+    입력:  gpos (B, T, J, 3). 첫/마지막 transition 프레임은 이웃한 context/target 프레임을 쓴다.
+    출력:  (B,)
+    """
+    s, e = frames.start, frames.stop
+    acc = gpos[:, s + 1:e + 1] - 2 * gpos[:, s:e] + gpos[:, s - 1:e - 1]          # (B, n, J, 3)
+    return acc.norm(dim=-1).mean(dim=(1, 2))
+
+
+def root_speed_per_clip(gpos: Tensor, frames: slice) -> Tensor:
+    """루트 수평 속도 (클립별, cm/frame) [결정 J8]. transition 프레임과 그 앞 프레임의 XZ 차이 크기 평균.
+
+    입력:  gpos (B, T, J, 3). 출력: (B,)
+    """
+    s, e = frames.start, frames.stop
+    v = gpos[:, s:e, 0, [0, 2]] - gpos[:, s - 1:e - 1, 0, [0, 2]]                 # (B, n, 2)
+    return v.norm(dim=-1).mean(dim=1)
+
+
 # -----------------------------------------------------------------------------
 # 데이터셋 전체 모으기
 # -----------------------------------------------------------------------------
@@ -163,6 +205,9 @@ class MetricAccumulator:
         self.emd: list[np.ndarray] = []
         self.w: list[np.ndarray] = []
         self.skate: list[np.ndarray] = []
+        self.jump: list[np.ndarray] = []
+        self.jitter: list[np.ndarray] = []
+        self.speed: list[np.ndarray] = []
 
     def add(self, gpos_pred: Tensor, gpos_gt: Tensor, q_pred: Tensor, q_gt: Tensor, frames: slice) -> None:
         """입력: gpos (B, T, J, 3), q (B, T, J, 4) 부호 정리된 전역 쿼터니언, frames = transition 구간."""
@@ -173,13 +218,18 @@ class MetricAccumulator:
         self.emd.append(emd)
         self.w.append(w)
         self.skate.append(foot_skating_per_clip(gpos_pred, self.foot_idx, self.height_cm, frames).cpu().numpy())
+        self.jump.append(boundary_jump_per_clip(gpos_pred, gpos_gt, frames).cpu().numpy())
+        self.jitter.append(jitter_per_clip(gpos_pred, frames).cpu().numpy())
+        self.speed.append(root_speed_per_clip(gpos_pred, frames).cpu().numpy())
 
     def result(self) -> dict[str, float]:
-        """{"L2P": 클립 평균, "L2Q": 클립 평균, "NPSS": 데이터셋 가중 합, "foot_skate": cm/frame, "n_clips"}."""
-        return {"L2P": float(np.concatenate(self.l2p).mean()),
-                "L2Q": float(np.concatenate(self.l2q).mean()),
+        """{"L2P": 클립 평균, "L2Q": 클립 평균, "NPSS": 데이터셋 가중 합, "foot_skate": cm/frame,
+        "boundary_jump": cm/frame, "jitter": cm/frame², "root_speed": cm/frame, "n_clips"}."""
+        mean = lambda xs: float(np.concatenate(xs).mean())   # noqa: E731
+        return {"L2P": mean(self.l2p), "L2Q": mean(self.l2q),
                 "NPSS": npss_reduce(np.concatenate(self.emd), np.concatenate(self.w)),
-                "foot_skate": float(np.concatenate(self.skate).mean()),
+                "foot_skate": mean(self.skate), "boundary_jump": mean(self.jump),
+                "jitter": mean(self.jitter), "root_speed": mean(self.speed),
                 "n_clips": int(sum(len(x) for x in self.l2p))}
 
 

@@ -13,12 +13,14 @@
      평가셋 long     : Subject 5, window 10 + max(lengths) + 2, offset 40 (2151 클립). 모든 길이에서 같은 시작 프레임
      방법: model (Context Transformer + 후처리 식 23), model_nopost (후처리 없음), interp (SLERP), zerov (zero-velocity),
            detail (두 단계: Context + 후처리 → Detail, Detail 출력은 후처리 없음 = 공식 README Detail 수치와 같은 조건),
-           detail_post (두 단계 + Detail 출력에도 후처리)
+           detail_post (두 단계 + Detail 출력에도 후처리),
+           model_lock / detail_lock (model / detail 결과에 발 고정 IK 후처리, lengths.yaml foot_lock 설정, J9)
    detail 방법은 lengths.yaml 의 detail_ckpt (또는 --detail-ckpt) 가 있어야 한다. Detail 학습 때 고정한 Context 가
    ckpt 와 다르면 시작하지 않는다 (src.evaluation.inference.load_detail).
 4. 저장 (outputs/eval/<run>/)
      metrics_by_length.csv : 평가셋, 클립 수, 길이 (프레임/초), 학습 범위 안/밖, 방법, L2P, L2Q, NPSS,
-                             발 미끄러짐 (예측/GT), README 수치 (official 평가셋), 실제 배치 크기
+                             발 미끄러짐 (예측/GT), 경계 점프, 떨림 (예측/GT), 루트 속도 (예측/GT) (J8),
+                             README 수치 (official 평가셋), 실제 배치 크기, 후처리 방식
      metrics_by_length.png : long 평가셋의 길이 vs 각 지표 (학습 범위 [5, 30] 음영, README 수치 점)
      run_info.json         : 체크포인트, 설정, 평가 시각
 5. GPU 메모리가 부족하면 배치를 절반으로 줄여 그 길이를 처음부터 다시 계산하고, 줄였다고 출력·CSV 에 남긴다.
@@ -34,6 +36,9 @@
     python scripts/eval_lengths.py --render                                 # + 길이별 샘플 영상
     python scripts/eval_lengths.py --sets official --lengths 5 15 30 45 --methods model detail   # README Detail 비교
     python scripts/eval_lengths.py --detail-ckpt experiments/det_base/last.pth --methods detail  # 학습 중간 확인
+    # 긴 transition 재학습 결과 (J 절). 후처리 방식 기본값 = 학습 설정 (ctx_long: ramp)
+    python scripts/eval_lengths.py --ckpt experiments/ctx_long/best.pth --methods model model_nopost interp
+    python scripts/eval_lengths.py --post-mode ramp --out outputs/eval/ctx_base_ramp --methods model   # ctx_base + ramp
 """
 
 from __future__ import annotations
@@ -66,6 +71,7 @@ from src.evaluation.inference import (  # noqa: E402
     LoadedRun,
     build_eval_dataset,
     describe,
+    foot_lock,
     load_detail,
     load_run,
     max_trans_for_window,
@@ -78,17 +84,22 @@ from src.evaluation.metrics import (  # noqa: E402
     foot_skating_per_clip,
     global_quats,
     global_rot_pos,
+    jitter_per_clip,
+    root_speed_per_clip,
 )
 from src.training.context import run_model  # noqa: E402
-from src.training.context_inputs import postprocess  # noqa: E402
+from src.training.context_inputs import POSTPROCESS_MODES, postprocess  # noqa: E402
 from src.training.detail import run_detail  # noqa: E402
 
-METHODS = ("model", "model_nopost", "detail", "detail_post", "interp", "zerov")
-DETAIL_METHODS = ("detail", "detail_post")
+METHODS = ("model", "model_nopost", "model_lock", "detail", "detail_post", "detail_lock", "interp", "zerov")
+DETAIL_METHODS = ("detail", "detail_post", "detail_lock")
 METHOD_LABEL = {"model": "Context Transformer (+post)", "model_nopost": "Context Transformer (no post)",
+                "model_lock": "Context Transformer (+post +foot lock)",
                 "detail": "Two-stage (Context+Detail)", "detail_post": "Two-stage (+post on Detail)",
+                "detail_lock": "Two-stage (+foot lock)",
                 "interp": "Interpolation (SLERP)", "zerov": "Zero-velocity"}
-METRICS = ("L2P", "L2Q", "NPSS", "foot_skate")
+METRICS = ("L2P", "L2Q", "NPSS", "foot_skate", "boundary_jump", "jitter")
+GT_METRICS = ("foot_skate", "jitter", "root_speed")      # GT 값도 같이 계산해서 기준으로 보고
 
 
 def parse_args() -> argparse.Namespace:
@@ -102,6 +113,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--batch-size", type=int, default=None, help="기본: lengths.yaml 의 batch_size")
     ap.add_argument("--out", default=None, help="출력 폴더 (기본: lengths.yaml 의 out_dir)")
     ap.add_argument("--render", action="store_true", help="길이마다 render_samples.py 와 같은 샘플 영상도 저장")
+    ap.add_argument("--post-mode", choices=POSTPROCESS_MODES, default=None,
+                    help="model 방법의 후처리 방식 (기본: 학습 설정 train.postprocess_mode, 없으면 mean = 식 23)")
     ap.add_argument("--env", default=None)
     ap.add_argument("--device", default=None)
     return ap.parse_args()
@@ -137,36 +150,49 @@ def load_bench_stats(run: LoadedRun, ecfg: dict) -> tuple[torch.Tensor, torch.Te
 @torch.no_grad()
 def eval_one_length(run: LoadedRun, ds, trans: int, methods: list[str], batch_size: int,
                     mean: torch.Tensor, std: torch.Tensor, foot_idx: list[int], height_cm: float,
-                    det: DetailRun | None = None) -> dict:
+                    det: DetailRun | None = None, post_mode: str = "mean", lock_cfg: dict | None = None) -> dict:
     """평가셋 ds 전체에서 transition `trans` 의 방법별 지표.
 
     배치마다: 정답 창 (prepare_window) → 방법별 예측 (정렬된 원값 (B, L, D)) → FK → 전역 쿼터니언 → 지표 누적.
     모델은 한 번만 돌리고, 후처리 (식 23) 는 그 출력에 따로 적용해서 model / model_nopost 를 같이 얻는다.
     detail 은 같은 Context 출력 (Detail 학습 설정대로 후처리) 을 Detail 에 넣는다 (src.training.detail.run_detail).
-    출력:  {방법: {"L2P", "L2Q", "NPSS", "foot_skate", "n_clips"}, "_gt_skate": GT 발 미끄러짐}
+    post_mode : model 방법의 후처리 방식 ("mean" = 식 23 | "ramp", J5). Detail 입력은 Detail 학습 때와 같은 "mean".
+    lock_cfg  : *_lock 방법의 발 고정 설정 {height_cm, speed_cm, blend} (lengths.yaml foot_lock, J9)
+    출력:  {방법: {"L2P", "L2Q", "NPSS", "foot_skate", "boundary_jump", "jitter", "root_speed", "n_clips"},
+            "_gt": {"foot_skate", "jitter", "root_speed"} GT 값}
     """
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=run.env["num_workers"])
     accs = {m: MetricAccumulator(mean, std, foot_idx, height_cm) for m in methods}
-    gt_skate = []
+    gt_vals: dict[str, list] = {k: [] for k in GT_METRICS}
     for batch in loader:
         pb, spec = prepare_window(run, batch, trans)
         s = spec.seq_slice
         grot_gt, gpos_gt = global_rot_pos(pb.x_gt_raw, pb.offsets, run.skel, run.layout)
         q_gt = global_quats(grot_gt)
-        gt_skate.append(foot_skating_per_clip(gpos_gt, foot_idx, height_cm, s).cpu().numpy())
+        gt_vals["foot_skate"].append(foot_skating_per_clip(gpos_gt, foot_idx, height_cm, s).cpu().numpy())
+        gt_vals["jitter"].append(jitter_per_clip(gpos_gt, s).cpu().numpy())
+        gt_vals["root_speed"].append(root_speed_per_clip(gpos_gt, s).cpu().numpy())
 
         preds = {}
-        if any(m in methods for m in ("model", "model_nopost", *DETAIL_METHODS)):
+        if any(m in methods for m in ("model", "model_nopost", "model_lock", *DETAIL_METHODS)):
             y = run_model(run.model, pb.x_gt, spec, run.layout)          # (B, L, D) 정규화, transition 만 예측
-            y_post = postprocess(y, pb.x_gt, spec)
+            y_post = postprocess(y, pb.x_gt, spec)                       # 식 23 (Detail 입력용)
             if "model_nopost" in methods:
                 preds["model_nopost"] = run.norm.denormalize(y)
-            if "model" in methods:
-                preds["model"] = run.norm.denormalize(y_post)
+            if "model" in methods or "model_lock" in methods:
+                y_m = y_post if post_mode == "mean" else postprocess(y, pb.x_gt, spec, post_mode)
+                x_m = run.norm.denormalize(y_m)
+                if "model" in methods:
+                    preds["model"] = x_m
+                if "model_lock" in methods:
+                    preds["model_lock"] = foot_lock(x_m, pb.offsets, run.skel, spec, **lock_cfg)
             if any(m in methods for m in DETAIL_METHODS):
                 y_det, _ = run_detail(det.model, y_post if det.ctx_postprocess else y, pb.x_gt, spec)
                 if "detail" in methods:
                     preds["detail"] = run.norm.denormalize(y_det)
+                if "detail_lock" in methods:
+                    preds["detail_lock"] = foot_lock(run.norm.denormalize(y_det), pb.offsets, run.skel, spec,
+                                                     **lock_cfg)
                 if "detail_post" in methods:
                     preds["detail_post"] = run.norm.denormalize(postprocess(y_det, pb.x_gt, spec))
         if "interp" in methods:
@@ -178,16 +204,18 @@ def eval_one_length(run: LoadedRun, ds, trans: int, methods: list[str], batch_si
             grot, gpos = global_rot_pos(x_raw, pb.offsets, run.skel, run.layout)
             accs[m].add(gpos, gpos_gt, global_quats(grot), q_gt, s)
     out = {m: a.result() for m, a in accs.items()}
-    out["_gt_skate"] = float(np.concatenate(gt_skate).mean())
+    out["_gt"] = {k: float(np.concatenate(v).mean()) for k, v in gt_vals.items()}
     return out
 
 
-def eval_with_retry(run, ds, trans, methods, batch_size, *stat_args, det=None) -> tuple[dict, int]:
+def eval_with_retry(run, ds, trans, methods, batch_size, *stat_args, det=None, post_mode="mean",
+                    lock_cfg=None) -> tuple[dict, int]:
     """eval_one_length + GPU 메모리 부족 시 배치를 절반으로 줄여 처음부터 다시. 출력: (결과, 실제 배치 크기)."""
     bs = batch_size
     while True:
         try:
-            return eval_one_length(run, ds, trans, methods, bs, *stat_args, det=det), bs
+            return eval_one_length(run, ds, trans, methods, bs, *stat_args, det=det, post_mode=post_mode,
+                                   lock_cfg=lock_cfg), bs
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
             if bs == 1:
@@ -206,12 +234,13 @@ def readme_value(ecfg: dict, method: str, trans: int) -> list[float | None]:
 
 
 def plot_lengths(rows: list[dict], train_range: tuple[int, int], path: Path, run_name: str) -> None:
-    """long 평가셋: 길이 vs L2P / L2Q / NPSS / 발 미끄러짐. README 수치 (official) 는 점으로."""
+    """long 평가셋: 길이 vs L2P / L2Q / NPSS / 발 미끄러짐 / 경계 점프 / 떨림. README 수치 (official) 는 점으로."""
     long_rows = [r for r in rows if r["set"] == "long"]
     if not long_rows:
         return
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-    colors = {"model": "tab:orange", "model_nopost": "tab:red", "detail": "tab:purple", "detail_post": "tab:pink",
+    fig, axes = plt.subplots(2, 3, figsize=(17, 8))
+    colors = {"model": "tab:orange", "model_nopost": "tab:red", "model_lock": "tab:brown",
+              "detail": "tab:purple", "detail_post": "tab:pink", "detail_lock": "tab:olive",
               "interp": "tab:blue", "zerov": "tab:gray"}
     for ax, metric in zip(axes.flat, METRICS):
         ax.axvspan(train_range[0], train_range[1], color="tab:green", alpha=0.10, lw=0,
@@ -220,10 +249,10 @@ def plot_lengths(rows: list[dict], train_range: tuple[int, int], path: Path, run
             pts = sorted((r["trans"], r[metric]) for r in long_rows if r["method"] == m)
             if pts:
                 ax.plot(*zip(*pts), "-o", ms=4, color=colors[m], label=METHOD_LABEL[m])
-        if metric == "foot_skate":
-            pts = sorted({(r["trans"], r["foot_skate_gt"]) for r in long_rows})
+        if metric in GT_METRICS:
+            pts = sorted({(r["trans"], r[f"{metric}_gt"]) for r in long_rows})
             ax.plot(*zip(*pts), "--", color="black", lw=1.2, label="GT")
-        else:
+        elif metric in ("L2P", "L2Q", "NPSS"):
             k = METRICS.index(metric)
             for m in ("model", "detail", "interp"):
                 ref = sorted({(r["trans"], r[f"readme_{metric}"]) for r in rows
@@ -237,7 +266,8 @@ def plot_lengths(rows: list[dict], train_range: tuple[int, int], path: Path, run
         ax.set_xticklabels([str(t) for t in ticks])
         ax.set_xlabel("transition length (frames, 30 fps)")
         ax.set_title({"L2P": "L2P (global position, z-scored)", "L2Q": "L2Q (global quaternion)",
-                      "NPSS": "NPSS", "foot_skate": "foot skating (cm/frame)"}[metric])
+                      "NPSS": "NPSS", "foot_skate": "foot skating (cm/frame)",
+                      "boundary_jump": "boundary velocity jump (cm/frame)", "jitter": "jitter (cm/frame²)"}[metric])
         ax.grid(alpha=0.3, which="both")
     axes.flat[0].legend(fontsize=8, loc="upper left")
     axes.flat[3].legend(fontsize=8, loc="upper left")
@@ -255,12 +285,14 @@ def print_table(rows: list[dict], set_name: str) -> None:
         return
     print(f"\n=== 평가셋 {set_name} ({sel[0]['n_clips']} 클립) ===")
     print(f"{'trans':>5} {'범위':<7} {'method':<13} {'L2P':>8} {'(README)':>9} {'L2Q':>8} {'(README)':>9} "
-          f"{'NPSS':>8} {'(README)':>9} {'skate':>7} {'GT':>6} {'bs':>4}")
+          f"{'NPSS':>8} {'(README)':>9} {'skate':>7} {'GT':>6} {'jump':>6} {'jitter':>6} {'GT':>6} "
+          f"{'speed':>6} {'GT':>6} {'bs':>4}")
     for r in sel:
         ref = lambda k: f"{r[k]:9.4f}" if r[k] is not None else f"{'-':>9}"   # noqa: E731
         print(f"{r['trans']:5d} {r['train_range']:<7} {r['method']:<13} {r['L2P']:8.4f} {ref('readme_L2P')} "
               f"{r['L2Q']:8.4f} {ref('readme_L2Q')} {r['NPSS']:8.4f} {ref('readme_NPSS')} "
-              f"{r['foot_skate']:7.3f} {r['foot_skate_gt']:6.3f} {r['batch_size']:4d}")
+              f"{r['foot_skate']:7.3f} {r['foot_skate_gt']:6.3f} {r['boundary_jump']:6.2f} {r['jitter']:6.3f} "
+              f"{r['jitter_gt']:6.3f} {r['root_speed']:6.2f} {r['root_speed_gt']:6.2f} {r['batch_size']:4d}")
 
 
 # -----------------------------------------------------------------------------
@@ -276,9 +308,11 @@ def main() -> None:
         ecfg = dict(ecfg, lengths=sorted(set(ecfg["lengths"]) | set(args.lengths)))   # long window 가 커짐
         print(f"[알림] --lengths 가 설정보다 길어 long 평가셋 window 를 늘립니다 (다른 길이와 시작 프레임이 달라질 수 있음).")
     run = load_run(args.ckpt or ecfg["ckpt"], env_name=args.env, device=args.device)
+    post_mode = args.post_mode or run.post_mode
     info = describe(run)
+    info["post_mode"] = post_mode
     print(f"체크포인트 {info['ckpt']} (iteration {info['iteration']}), device={run.device}, "
-          f"context {run.ctx}, 학습 transition 범위 {run.train_range}")
+          f"context {run.ctx}, 학습 transition 범위 {run.train_range}, model 후처리 {post_mode}")
     det = None
     if any(m in methods for m in DETAIL_METHODS):
         det_ckpt = args.detail_ckpt or ecfg.get("detail_ckpt")
@@ -312,7 +346,8 @@ def main() -> None:
                 continue
             tic = time.time()
             res, bs = eval_with_retry(run, ds, trans, methods, batch_size, mean, std, foot_idx,
-                                      float(fs["height_threshold_cm"]), det=det)
+                                      float(fs["height_threshold_cm"]), det=det, post_mode=post_mode,
+                                      lock_cfg=dict(ecfg.get("foot_lock", {})))
             label = train_range_label(trans, run.train_range)
             msg = []
             for m in methods:
@@ -321,9 +356,12 @@ def main() -> None:
                 rows.append({"set": set_name, "n_clips": r["n_clips"], "trans": trans,
                              "seconds": round(trans / run.data_cfg["fps"], 3), "train_range": label,
                              "method": m, "L2P": r["L2P"], "L2Q": r["L2Q"], "NPSS": r["NPSS"],
-                             "foot_skate": r["foot_skate"], "foot_skate_gt": res["_gt_skate"],
+                             "foot_skate": r["foot_skate"], "foot_skate_gt": res["_gt"]["foot_skate"],
+                             "boundary_jump": r["boundary_jump"], "jitter": r["jitter"],
+                             "jitter_gt": res["_gt"]["jitter"], "root_speed": r["root_speed"],
+                             "root_speed_gt": res["_gt"]["root_speed"],
                              "readme_L2P": ref[0], "readme_L2Q": ref[1], "readme_NPSS": ref[2],
-                             "batch_size": bs})
+                             "batch_size": bs, "post_mode": post_mode if m in ("model", "model_lock") else ""})
                 msg.append(f"{m} L2P {r['L2P']:.4f}")
             print(f"  trans {trans:3d} ({label}, batch {bs}{' ← 줄임' if bs != batch_size else ''}): "
                   f"{', '.join(msg)}  ({time.time() - tic:.0f}초)")

@@ -31,10 +31,15 @@ class RelativePositionMLP(nn.Module):
     값을 만들 수 있다 (논문 3.3.1 의 장점).
 
     forward(T) 출력: (2T−1, d_head). 행 k 는 상대 거리 k − (T−1) ∈ [−(T−1), T−1].
+
+    dist_scale: MLP 에 넣기 전에 거리 (프레임) 에 곱하는 값. 1.0 = 프레임 그대로 (기존, 공식 코드).
+                1/30 = 초 단위 [결정 J6]. 긴 클립 (T = 312 → 거리 ±311) 에서 첫 Linear 의 출력이 너무 커져
+                어텐션 점수가 한 key 로 몰리는 것 (softmax 포화) 을 막는다.
     """
 
-    def __init__(self, d_head: int, dropout: float = 0.0):
+    def __init__(self, d_head: int, dropout: float = 0.0, dist_scale: float = 1.0):
         super().__init__()
+        self.dist_scale = float(dist_scale)
         self.net = nn.Sequential(
             nn.Linear(1, d_head), nn.PReLU(), nn.Dropout(dropout),
             nn.Linear(d_head, d_head), nn.Dropout(dropout),
@@ -42,7 +47,7 @@ class RelativePositionMLP(nn.Module):
 
     def forward(self, T: int, dtype: torch.dtype, device: torch.device) -> Tensor:
         dist = torch.arange(-(T - 1), T, dtype=dtype, device=device)[:, None]   # (2T−1, 1)
-        return self.net(dist)                                                   # (2T−1, d)
+        return self.net(dist * self.dist_scale)                                                   # (2T−1, d)
 
 
 def relative_index(T: int, device: torch.device | None = None) -> Tensor:
@@ -129,14 +134,16 @@ class KeyframePositionMLP(nn.Module):
 
     입력 (..., T, 2): 각 프레임의 [마지막 context 프레임으로부터 거리, target 프레임까지 거리]
     출력 (..., T, d_model)
+    dist_scale: 거리에 곱하는 값 (RelativePositionMLP 와 같은 뜻, 기본 1.0 = 기존)
     """
 
-    def __init__(self, d_model: int, dropout: float = 0.0):
+    def __init__(self, d_model: int, dropout: float = 0.0, dist_scale: float = 1.0):
         super().__init__()
+        self.dist_scale = float(dist_scale)
         self.net = nn.Sequential(
             nn.Linear(2, d_model), nn.PReLU(), nn.Dropout(dropout),
             nn.Linear(d_model, d_model), nn.Dropout(dropout),
         )
 
     def forward(self, keyframe_pos: Tensor) -> Tensor:
-        return self.net(keyframe_pos)
+        return self.net(keyframe_pos * self.dist_scale)

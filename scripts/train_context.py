@@ -13,6 +13,21 @@
 4. val_interval 마다 val 손실, ckpt_interval 마다 체크포인트 저장
    결과 폴더: <experiments_dir>/<run_name>/  (config.yaml, log.csv, last.pth, best.pth)
 
+긴 transition 재학습 (docs/assumptions.md J 절, 결과 experiments/ctx_long) 에서 추가한 것.
+모두 설정으로 켜고, 설정에 없으면 기존 (ctx_base) 과 같다:
+  - --set data.<키>=값      : configs/data/lafan1.yaml 값 덮어쓰기 (학습 범위 max_trans, train/val window)  (J1)
+  - train.trans_dist        : 길이 분포 uniform | log_uniform                                            (J2)
+  - train.midway_none_p / midway_max : 제약 프레임 없는 배치 확률 / 시도 횟수 상한                         (J3)
+  - loss.w_vel / w_foot     : 정답 속도 L1 / 정답 접촉 × 발 속도 L1                                      (J4)
+  - loss.w_skate            : 예측 발가락 높이 가중 × 수평 속도 (정답 접촉 불필요)                       (J12)
+  - train.postprocess_mode  : 검증 후처리 mean (식 23) | ramp                                            (J5)
+  - train.loss_on_postprocess : true 면 학습·검증 손실도 후처리 (postprocess_mode) 를 거친 출력에서 계산  (J13)
+  - --reset-best            : 손실 설정을 바꿔 이어서 학습할 때 best 기준을 새로 잡기                     (J13)
+  - model.pe_scale          : 위치 인코딩 거리 배율 (1/30 = 초 단위)                                     (J6)
+  - train.best_metric       : best 기준 last (val_trans 마지막 길이 손실) | mean (모든 val 길이 손실 평균) (J7)
+  - 배치를 매번 ctx + trans + 2 프레임으로 잘라서 계산 (결과는 같고 긴 window 에서 빠름; E1 과 같은 이유)
+  - 검증에 발 미끄러짐 (val{t}_foot_skate, 평가 지표 F4 와 같은 식) 기록
+
 정규화 통계는 scripts/compute_stats.py 가 만든 파일을 쓴다 (먼저 실행해야 함).
 
 실행 예:
@@ -20,6 +35,9 @@
     python scripts/train_context.py --env lab --batch-size 64 --amp bf16 --run-name ctx_bs64
     python scripts/train_context.py --env lab --resume last              # 이어서 학습
     python scripts/train_context.py --env lab --set model.n_layer=4 train.max_iters=100000
+    # 긴 transition 재학습 (명령 전체는 scripts/README.md "2b")
+    python scripts/train_context.py --env lab --run-name ctx_long --set data.max_trans=300 \
+        data.splits.train.window=312 data.splits.val.window=312 train.trans_dist=log_uniform ...
 
     # 데이터 없이 스크립트가 끝까지 도는지만 확인 (가짜 LaFAN1 형식 BVH 생성, 작은 모델):
     python scripts/train_context.py --env laptop --fake-data --max-iters 20 \
@@ -54,6 +72,7 @@ from src.config import (  # noqa: E402
 from src.data.dataset import LafanDataset  # noqa: E402
 from src.data.representation import FeatureLayout, ZScoreNormalizer  # noqa: E402
 from src.data.skeleton import Skeleton  # noqa: E402
+from src.evaluation.metrics import foot_skating_per_clip  # noqa: E402
 from src.models.context_transformer import build_context_transformer, count_parameters  # noqa: E402
 from src.training.context import context_forward, eval_transition, gpos_l2, prepare_batch  # noqa: E402
 from src.training.context_inputs import sample_transition  # noqa: E402
@@ -70,14 +89,22 @@ from src.training.utils import (  # noqa: E402
 # -----------------------------------------------------------------------------
 # 설정
 # -----------------------------------------------------------------------------
-def apply_overrides(cfg: dict, items: list[str]) -> None:
-    """--set a.b=값 들을 cfg 에 반영. 값은 YAML 로 해석 (숫자, null, [1,2] 등)."""
+def apply_overrides(cfg: dict, items: list[str], data_cfg: dict | None = None) -> None:
+    """--set a.b=값 들을 cfg 에 반영. 값은 YAML 로 해석 (숫자, null, [1,2] 등).
+
+    "data." 로 시작하는 키는 data_cfg (configs/data/lafan1.yaml) 에 반영한다 (J1).
+    예) data.max_trans=300 data.splits.train.window=312
+    """
     for item in items:
         key, sep, value = item.partition("=")
         if not sep:
             raise ValueError(f"--set 형식은 key.sub=value: {item!r}")
         node = cfg
         parts = key.split(".")
+        if parts[0] == "data":
+            if data_cfg is None:
+                raise ValueError(f"data.* 덮어쓰기를 받을 data_cfg 가 없습니다: {item!r}")
+            node, parts = data_cfg, parts[1:]
         for p in parts[:-1]:
             node = node.setdefault(p, {})
         node[parts[-1]] = yaml.safe_load(value)
@@ -92,6 +119,8 @@ def parse_args() -> argparse.Namespace:
                     help="정규화 통계 .npz (기본: <cache_dir>/stats/lafan1_context_stats.npz)")
     ap.add_argument("--resume", default=None, help="체크포인트 경로, 또는 'last' / 'best' (run 폴더 안)")
     # 자주 바꾸는 값은 바로가기 인자로 (설정 파일 값을 덮어씀)
+    ap.add_argument("--reset-best", action="store_true",
+                    help="이어서 학습할 때 체크포인트의 best val 을 버리고 새로 잡기 (손실 설정을 바꿨을 때)")
     ap.add_argument("--batch-size", type=int, default=None, help="train.batch_size")
     ap.add_argument("--grad-accum", type=int, default=None, help="train.grad_accum_steps")
     ap.add_argument("--max-iters", type=int, default=None, help="train.max_iters")
@@ -140,26 +169,47 @@ def compute_fake_stats(bvh_dir: Path, data_cfg: dict, skel: Skeleton, out: Path)
 # -----------------------------------------------------------------------------
 # 검증
 # -----------------------------------------------------------------------------
+# 검증 발 미끄러짐: 평가 지표 (configs/eval/lengths.yaml foot_skating, F4) 와 같은 관절·높이
+SKATE_JOINTS, SKATE_HEIGHT_CM = ("LeftToe", "RightToe"), 3.0
+
+
 @torch.no_grad()
-def validate(model, loader, trans_list, data_cfg, skel, layout, norm, loss_w, device) -> dict[str, float]:
-    """val 분할에서 transition 길이별 손실 (학습과 같은 식, 후처리 없음) 과
-    전역 관절 위치 평균 L2 오차 (cm, 후처리 포함) 를 계산한다.
+def validate(model, loader, trans_list, data_cfg, skel, layout, norm, loss_w, device,
+             post_mode: str = "mean", loss_post: str | None = None) -> dict[str, float]:
+    """val 분할에서 transition 길이별 손실 (학습과 같은 식: loss_post 가 None 이면 후처리 없음, J13 이면 후처리한 출력),
+    전역 관절 위치 평균 L2 오차 (cm, 후처리 포함), 발 미끄러짐 (cm/frame, 후처리 포함; GT 는 *_gt) 을 계산한다.
     """
     sums: dict[str, float] = {}
     n_batches = 0
+    skate_idx = [skel.names.index(n) for n in SKATE_JOINTS]
     model.eval()
     for batch in loader:
         n_batches += 1
         for trans in trans_list:
             # 자르기 → 정렬 → 추론(후처리) → FK. scripts/render_compare.py 도 같은 함수를 쓴다.
-            pb, spec, _, gpos = eval_transition(model, batch, trans, data_cfg, skel, layout, norm, device)
-            losses = context_forward(model, pb, spec, skel, layout, norm, loss_w)
+            pb, spec, _, gpos = eval_transition(model, batch, trans, data_cfg, skel, layout, norm, device,
+                                                post_mode=post_mode)
+            losses = context_forward(model, pb, spec, skel, layout, norm, loss_w, post_mode=loss_post)
             l2 = gpos_l2(gpos, pb.gpos_gt, spec.seq_slice)
             for k, v in losses.items():
                 sums[f"val{trans}_{k}"] = sums.get(f"val{trans}_{k}", 0.0) + float(v)
             sums[f"val{trans}_gpos_l2"] = sums.get(f"val{trans}_gpos_l2", 0.0) + float(l2)
+            for name, g in (("foot_skate", gpos), ("foot_skate_gt", pb.gpos_gt)):
+                v = foot_skating_per_clip(g, skate_idx, SKATE_HEIGHT_CM, spec.seq_slice).mean()
+                sums[f"val{trans}_{name}"] = sums.get(f"val{trans}_{name}", 0.0) + float(v)
     model.train()
     return {k: v / max(n_batches, 1) for k, v in sums.items()}
+
+
+def best_value(res: dict[str, float], val_trans: list[int], metric: str) -> tuple[str, float]:
+    """best 체크포인트 기준 (J7). last = 마지막 val 길이의 손실 (ctx_base), mean = 모든 val 길이 손실의 평균."""
+    if metric == "last":
+        key = f"val{val_trans[-1]}_loss"
+        return key, res[key]
+    if metric == "mean":
+        return "mean(" + ",".join(str(t) for t in val_trans) + ")_loss", \
+            sum(res[f"val{t}_loss"] for t in val_trans) / len(val_trans)
+    raise ValueError(f"train.best_metric 은 last 또는 mean: {metric!r}")
 
 
 # -----------------------------------------------------------------------------
@@ -177,8 +227,15 @@ def main() -> None:
     for k, v in shortcuts.items():
         if v is not None:
             cfg["train"][k] = None if v in ("none", "null") else v
-    apply_overrides(cfg, args.set)
+    apply_overrides(cfg, args.set, data_cfg)
     tcfg, loss_w = cfg["train"], cfg["loss"]
+    post_mode = str(tcfg.get("postprocess_mode", "mean"))
+    # [결정 J13] 학습 손실을 후처리한 출력에서 계산할지 (기본 false = 논문·공식 코드와 같음)
+    loss_post = post_mode if bool(tcfg.get("loss_on_postprocess", False)) else None
+    best_metric = str(tcfg.get("best_metric", "last"))
+    trans_kw = {"distribution": str(tcfg.get("trans_dist", "uniform")),
+                "midway_none_p": float(tcfg.get("midway_none_p", 0.0)),
+                "midway_max": tcfg.get("midway_max")}
 
     device = resolve_device(env)
     num_workers = env["num_workers"] if args.num_workers is None else args.num_workers
@@ -252,6 +309,11 @@ def main() -> None:
             scaler.load_state_dict(ckpt["scaler"])
         iteration, epoch, best_val = ckpt["iteration"], ckpt["epoch"], ckpt["best_val"]
         print(f"이어서 학습: {ckpt_path} (iteration {iteration})")
+        if args.reset_best:
+            # 손실 설정 (가중치, loss_on_postprocess 등) 을 바꿔 이어서 학습하면 val 손실의 뜻이 달라져서
+            # 이전 best 값과 비교할 수 없다 → best 기준을 처음부터 다시 잡는다
+            best_val = math.inf
+            print("  --reset-best: best 기준을 처음부터 다시 잡습니다")
 
     resolved = {"env": env["name"], "data": {k: str(v) if isinstance(v, Path) else v for k, v in data_cfg.items()},
                 **copy.deepcopy(cfg), "fake_data": args.fake_data, "stats": str(stats_path)}
@@ -289,9 +351,13 @@ def main() -> None:
             # 배치마다 transition 길이/제약 프레임을 새로 뽑는다 (배치 안에서는 공통)
             spec = sample_transition(ctx, min_trans, max_trans, window,
                                      float(tcfg.get("midway_targets_amount", 0.0)),
-                                     float(tcfg.get("midway_targets_p", 0.0)), rng)
+                                     float(tcfg.get("midway_targets_p", 0.0)), rng, **trans_kw)
+            # target 다음 프레임까지만 남긴다 (ctx + trans + 2). 그 뒤 프레임은 key 마스크로 어떤 출력에도
+            # 영향이 없고 손실에도 안 쓰이므로 결과는 같고 (E1), 긴 window 에서 계산만 줄어든다.
+            L = spec.target_idx + 2
+            batch = {k: (v[:, :L] if k in ("root_pos", "local_rot", "contacts") else v) for k, v in batch.items()}
             pb = prepare_batch(batch, skel, norm, ctx, data_cfg["forward_world_axis"], device)
-            losses = context_forward(model, pb, spec, skel, layout, norm, loss_w, amp_dtype)
+            losses = context_forward(model, pb, spec, skel, layout, norm, loss_w, amp_dtype, post_mode=loss_post)
             loss = losses["loss"] / accum
             if scaler is not None:
                 scaler.scale(loss).backward()
@@ -318,8 +384,10 @@ def main() -> None:
             avg = {k: v / n for k, v in running.items()}
             dt = (time.time() - t0) / n
             mem = f", VRAM 최대 {torch.cuda.max_memory_allocated(device) / 2**20:.0f}MB" if device.type == "cuda" else ""
+            extra = "".join(f" {k} {avg[k]:.3f}" for k in ("vel", "foot", "skate") if k in avg)
             print(f"it {iteration:7d} ep {epoch:3d} lr {lr:.2e} | loss {avg['loss']:.4f} "
-                  f"rot {avg['rot']:.4f} pos {avg['pos']:.3f} smooth {avg['smooth']:.3f} | {dt * 1000:.0f}ms/it{mem}")
+                  f"rot {avg['rot']:.4f} pos {avg['pos']:.3f} smooth {avg['smooth']:.3f}{extra} | "
+                  f"{dt * 1000:.0f}ms/it{mem}")
             for k, v in avg.items():
                 log.writerow([iteration, epoch, "train", k, f"{v:.6g}"])
             log.writerow([iteration, epoch, "train", "lr", f"{lr:.6g}"])
@@ -327,14 +395,16 @@ def main() -> None:
             running, t0 = {}, time.time()
 
         if iteration % int(tcfg.get("val_interval", 2000)) == 0 or iteration == max_iters:
-            res = validate(model, val_loader, val_trans, data_cfg, skel, layout, norm, loss_w, device)
-            print("  [val] " + ", ".join(f"{k} {v:.4f}" for k, v in res.items() if k.endswith(("_loss", "_gpos_l2"))))
+            res = validate(model, val_loader, val_trans, data_cfg, skel, layout, norm, loss_w, device, post_mode,
+                           loss_post)
+            print("  [val] " + ", ".join(f"{k} {v:.4f}" for k, v in res.items()
+                                         if k.endswith(("_loss", "_gpos_l2", "_foot_skate"))))
             for k, v in res.items():
                 log.writerow([iteration, epoch, "val", k, f"{v:.6g}"])
             log_file.flush()
-            key = f"val{val_trans[-1]}_loss" if val_trans else None
-            if key and res[key] < best_val:
-                best_val = res[key]
+            key, value = best_value(res, val_trans, best_metric) if val_trans else (None, math.inf)
+            if key and value < best_val:
+                best_val = value
                 save_checkpoint(run_dir / "best.pth", model, optimizer, scaler, iteration, epoch, best_val, resolved)
                 print(f"  best 갱신 ({key} = {best_val:.4f}) → best.pth")
             t0 = time.time()

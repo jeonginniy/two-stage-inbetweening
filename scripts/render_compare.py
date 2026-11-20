@@ -379,8 +379,10 @@ def infer_clips(run: Run, idx: list[int], trans: int, pre: int, total: int, with
     ds, ctx = run.val_ds, run.ctx
     clips = [ds.locate(i) for i in idx]
     batch = default_collate([ds[i] for i in idx])
+    # 후처리 방식은 학습 설정 그대로 (train.postprocess_mode, 없으면 식 23 = "mean"; docs/assumptions.md J5)
     pb, spec, y, gpos = eval_transition(run.model, batch, trans, run.data_cfg, run.skel, run.layout,
-                                        run.norm, run.device)
+                                        run.norm, run.device,
+                                        post_mode=str(run.cfg.get("train", {}).get("postprocess_mode", "mean")))
     gpos_slerp = slerp_baseline(pb, spec, run.skel, run.layout) if with_slerp else None
     # 정렬 기준 프레임 = 늘린 시퀀스의 pre + ctx − 1 = 모델 창의 ctx − 1
     ext = extended_batch(ds, clips, pre, total)

@@ -151,3 +151,45 @@ def forward_kinematics(local_rot: Tensor, local_pos: Tensor, parents: Sequence[i
         g_pos.append(g_pos[p] + (g_rot[p] @ local_pos[..., j, :, None]).squeeze(-1))
     # 리스트에 모은 뒤 stack: in-place 대입을 피해서 autograd 가 안전하게 동작
     return torch.stack(g_rot, dim=-3), torch.stack(g_pos, dim=-2)
+
+
+# -----------------------------------------------------------------------------
+# 다리 IK (발 고정 후처리용, docs/assumptions.md J9)
+# -----------------------------------------------------------------------------
+def rotation_between(a: Tensor, b: Tensor, eps: float = 1e-8) -> Tensor:
+    """벡터 a 방향을 b 방향으로 돌리는 **최소 회전** (Rodrigues). 축 = a × b, 각 = a 와 b 사이 각.
+
+    입력:  a, b (..., 3)  (길이는 상관없음)
+    출력:  (..., 3, 3)    R @ â = b̂.  a ≈ b 이면 단위행렬. a ≈ −b (180°) 는 다리 IK 에서 생기지 않아 따로 다루지 않음
+    """
+    a = a / a.norm(dim=-1, keepdim=True).clamp_min(eps)
+    b = b / b.norm(dim=-1, keepdim=True).clamp_min(eps)
+    v = torch.cross(a, b, dim=-1)                                  # sin θ · 축
+    c = (a * b).sum(-1)[..., None, None]                           # cos θ
+    zero = torch.zeros_like(v[..., 0])
+    K = torch.stack([zero, -v[..., 2], v[..., 1],
+                     v[..., 2], zero, -v[..., 0],
+                     -v[..., 1], v[..., 0], zero], dim=-1).reshape(*v.shape[:-1], 3, 3)
+    eye = torch.eye(3, dtype=a.dtype, device=a.device).expand_as(K)
+    return eye + K + (K @ K) / (1 + c).clamp_min(eps)
+
+
+def two_bone_ik(hip: Tensor, knee: Tensor, ankle: Tensor, target: Tensor,
+                eps: float = 1e-3) -> tuple[Tensor, Tensor]:
+    """해석적 2-뼈 IK: 엉덩이 hip 은 그대로, 뼈 길이를 지키면서 발목을 target 에 놓는 새 무릎·발목 위치.
+
+    무릎이 굽는 평면은 지금 무릎 위치로 정한다 (hip → target 축에 수직인 무릎 방향 성분 = pole).
+    target 이 닿지 않는 거리면 다리를 최대로 펴거나 접은 위치 (hip → target 방향) 로 제한한다.
+    입력:  hip, knee, ankle, target (..., 3)  전역 위치 (cm)
+    출력:  (knee_new, ankle_new) (..., 3)
+    """
+    a = (knee - hip).norm(dim=-1, keepdim=True)                    # 허벅지 길이
+    b = (ankle - knee).norm(dim=-1, keepdim=True)                  # 정강이 길이
+    dv = target - hip
+    u = dv / dv.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+    d = dv.norm(dim=-1, keepdim=True).clamp(min=(a - b).abs() + eps, max=a + b - eps)
+    pole = (knee - hip) - ((knee - hip) * u).sum(-1, keepdim=True) * u
+    pole = pole / pole.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+    x = (a ** 2 - b ** 2 + d ** 2) / (2 * d)                       # hip → 무릎을 u 축에 내린 길이
+    h = (a ** 2 - x ** 2).clamp_min(0).sqrt()
+    return hip + u * x + pole * h, hip + u * d

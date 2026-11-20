@@ -62,7 +62,21 @@ bench_stats:
 #   zerov        : zero-velocity (마지막 context 포즈 유지) 기준선 ← 공식 README zerov_*
 #   detail       : 두 단계 (Context + 후처리 → Detail), Detail 출력 후처리 없음 ← 공식 README Detail (full)
 #   detail_post  : 두 단계 + Detail 출력에도 후처리 (식 23)       (README 수치 없음)
+#   model_lock   : model 결과 + 발 고정 IK 후처리 (아래 foot_lock, docs/assumptions.md J9)
+#   detail_lock  : detail 결과 + 발 고정 IK 후처리
 methods: [model, model_nopost, detail, detail_post, interp, zerov]
+
+# [결정] J9 발 고정 IK 후처리 (*_lock 방법). 예측 발가락이 높이 < height_cm 이고 수평 속도 < speed_cm (cm/frame) 인
+# 구간을 "접촉" 으로 보고 그 동안 발가락 수평 위치를 고정, 다리 (UpLeg-Leg-Foot) 를 2-뼈 IK 로 다시 맞춘다.
+# 구간 앞뒤 blend 프레임 동안 고정 비율을 1 → 0 으로 줄인다 (transition 양 끝에서도 0 부터, J9b).
+# 근거: 정답 발가락은 높이 3 cm 미만이 57%, 그때 수평 속도 중앙값 0.03, 95% 분위 3.8 cm/frame (Subject 1–4 실측).
+# [결정 J14] speed_cm 4 → 8: 낮은 발이 4–8 cm/frame 로 움직이는 것은 정답에 거의 없는 "끌림" 이라 고정하고,
+# 8 보다 빠르면 낮게 휘두르는 발 (swing) 로 보고 두지 않는다. pp_skate 150k: 미끄러짐 trans 90 0.75 → 0.38, L2P +4%
+# [결정 J14] blend 4 → 2: 짧은 transition 에서 L2P 손해가 작다 (ctx_base trans 5: +13% → +2.6%), 긴 길이도 L2P·경계 점프가 조금 좋음
+foot_lock:
+  height_cm: 3.0
+  speed_cm: 8.0
+  blend: 2
 
 # 발 미끄러짐 (선택, 논문에 없는 지표) [결정] F4
 #   발가락 높이 h < H 인 프레임의 수평 속도 × (2 − 2^(h/H)) 를 transition 프레임·관절 평균 (cm/frame).
