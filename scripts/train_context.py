@@ -28,6 +28,9 @@
   - 배치를 매번 ctx + trans + 2 프레임으로 잘라서 계산 (결과는 같고 긴 window 에서 빠름; E1 과 같은 이유)
   - 검증에 발 미끄러짐 (val{t}_foot_skate, 평가 지표 F4 와 같은 식) 기록
 
+G15 인과 확인 (docs/assumptions.md G21) 에서 추가한 것 (설정에 없으면 예전과 같다):
+  - train.snapshot_interval : N 이면 N iteration 마다 <run>/snap_it<번호>.pth 를 따로 남긴다 (중간 체크포인트)
+
 정규화 통계는 scripts/compute_stats.py 가 만든 파일을 쓴다 (먼저 실행해야 함).
 
 실행 예:
@@ -298,6 +301,7 @@ def main() -> None:
     accum = int(tcfg.get("grad_accum_steps", 1))
     grad_clip = tcfg.get("grad_clip")
     max_iters = int(tcfg["max_iters"])
+    snap_int = int(tcfg["snapshot_interval"]) if tcfg.get("snapshot_interval") else 0   # [결정 G21] 0 = 남기지 않음
 
     iteration, epoch, best_val = 0, 0, math.inf
     if args.resume:
@@ -411,6 +415,12 @@ def main() -> None:
 
         if iteration % int(tcfg.get("ckpt_interval", 5000)) == 0 or iteration == max_iters:
             save_checkpoint(run_dir / "last.pth", model, optimizer, scaler, iteration, epoch, best_val, resolved)
+
+        # [결정 G21] 중간 체크포인트 따로 남기기 (덮어쓰지 않음). 같은 폴더에 두어야 config.yaml 을 함께 읽을 수 있다
+        # (inference.load_run, train_detail.load_frozen_context 는 <체크포인트 폴더>/config.yaml 을 읽는다)
+        if snap_int and iteration % snap_int == 0:
+            save_checkpoint(run_dir / f"snap_it{iteration:06d}.pth", model, optimizer, scaler, iteration, epoch,
+                            best_val, resolved)
 
     log_file.close()
     print(f"끝: iteration {iteration}, best val {best_val:.4f}. 결과: {run_dir}")

@@ -73,6 +73,7 @@ train:
   log_interval: 100            # 학습 손실 출력 간격 (iteration)
   val_interval: 2000           # 검증 간격
   ckpt_interval: 5000          # 최신 체크포인트 저장 간격
+  snapshot_interval: null      # [결정 G21] 값 N 이면 N iteration 마다 snap_it<번호>.pth 를 따로 남긴다 (null = 남기지 않음 = 예전과 같음)
   val_trans: [5, 15, 30]       # 검증 transition 길이들. 마지막 값으로 best 체크포인트를 고른다
   val_batch_size: 64
   val_split: val               # configs/data/lafan1.yaml 의 splits 이름

@@ -456,7 +456,8 @@ def test_train_script_fake_data(tmp_path):
            "--fake-data", "--max-iters", "6", "--batch-size", "4", "--run-name", f"pytest_{tmp_path.name}",
            "--num-workers", "0", "--set", "model.n_layer=1", "model.d_model=32", "model.d_ff=32",
            "model.d_encoder_h=32", "model.d_decoder_h=32", "model.d_head=8", "model.n_head=2",
-           "train.log_interval=3", "train.val_interval=6", "train.ckpt_interval=6", "train.val_trans=[5,30]"]
+           "train.log_interval=3", "train.val_interval=6", "train.ckpt_interval=6", "train.val_trans=[5,30]",
+           "train.snapshot_interval=3"]
     res = subprocess.run(cmd, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=600)
     run_dir = PROJECT_ROOT / "experiments" / f"pytest_{tmp_path.name}"
     try:
@@ -464,6 +465,8 @@ def test_train_script_fake_data(tmp_path):
         assert "val30_loss" in res.stdout
         assert (run_dir / "last.pth").exists() and (run_dir / "best.pth").exists()
         assert (run_dir / "log.csv").exists() and (run_dir / "config.yaml").exists()
+        # [G21] 중간 체크포인트: 3, 6 iteration 에 따로 남는다
+        assert sorted(p.name for p in run_dir.glob("snap_it*.pth")) == ["snap_it000003.pth", "snap_it000006.pth"]
     finally:
         import shutil
         shutil.rmtree(run_dir, ignore_errors=True)
@@ -493,6 +496,7 @@ def test_train_script_long_options(tmp_path):
         assert cfg["data"]["max_trans"] == 60 and cfg["data"]["splits"]["train"]["window"] == 72
         assert cfg["train"]["postprocess_mode"] == "ramp" and cfg["loss"]["w_vel"] == 0.02
         assert cfg["train"]["loss_on_postprocess"] is True and " skate " in res.stdout
+        assert not list(run_dir.glob("snap_it*.pth"))                 # snapshot_interval 없으면 남기지 않음 (예전과 같음)
     finally:
         import shutil
         shutil.rmtree(run_dir, ignore_errors=True)
