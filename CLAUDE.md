@@ -20,7 +20,18 @@ Status (2026-11):
 
 ## Project
 
-From-scratch reimplementation of "Motion In-betweening via Two-stage Transformers" (Qin, Zheng, Zhou, TOG 2022) on LaFAN1. The official code (github.com/victorqin/motion_inbetweening) is **read for reference only — never import, copy, or execute it**. The only allowed contact is reading its result files (e.g. `train_stats_context.pkl` via the restricted numpy-only Unpickler in `scripts/compare_stats_with_official.py`).
+From-scratch reimplementation of "Motion In-betweening via Two-stage Transformers" (Qin, Zheng, Zhou, TOG 2022) on LaFAN1. The official code (github.com/victorqin/motion_inbetweening) is **read for reference only inside this repo**. Never import it, never copy it into this repo, and never run it from this repo or its `.venv`.
+
+**Exception for comparison** (allowed since 2026-11-26): the official code may be **run** in its own clone `~/projects/motion_inbetweening` (commit `fa9b6dc`) with its own conda env `inbetween` (Python 3.8, torch 1.8.2+cu111). Rules:
+- Never modify the clone's existing files. New scripts go only in its `ext/`, and they run the original scripts or functions as they are (e.g. `ext/run_no_tf32.py` via `runpy`).
+- Never mix the two environments.
+- Never overwrite this repo's `outputs/` or `experiments/`.
+- Bring back numbers and result files only (CSV/JSON/logs; pickles only through the restricted Unpickler). Never bring back code.
+- Turn TF32 off when exact numbers matter. On this Ampere GPU, torch 1.8.2 enables TF32 by default, which shifts metrics by up to 2e-4. With TF32 off, the README numbers reproduce to 4 decimals.
+
+The runbook and results are in `~/projects/motion_inbetweening/ext/RUNBOOK_ko.md` and assumption G20.
+
+Outside this exception, the only allowed contact is reading the official code's result files (e.g. `train_stats_context.pkl` via the restricted numpy-only Unpickler in `scripts/compare_stats_with_official.py`).
 
 Stages: 1 data pipeline (done, verified on real LaFAN1) → 2 Context Transformer (trained) → 3 Detail Transformer (planned, `configs/model/detail.yaml`) → 4 evaluation + visualization (`src/evaluation/`, `src/visualization/`, in progress on `viz-update`). Progress tables live in `README.md`.
 
